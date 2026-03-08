@@ -2,11 +2,11 @@
 
 # ============================================================================
 #  Home Assistant Supervised — ULTIMATE INSTALLER
-#  Версия:    7.1 (Ultimate Edition)
+#  Версия:    7.2 (Final Release)
 #  Платформа: TV-Боксы и SBC (Armbian Bookworm / aarch64 / x86_64)
 # ============================================================================
 
-readonly SCRIPT_VERSION="7.1"
+readonly SCRIPT_VERSION="7.2"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly STATE_FILE="/root/.ha_install_state"
 readonly LOCK_FILE="/var/lock/ha_install.lock"
@@ -37,7 +37,6 @@ INFO="${BLUE}ℹ${NC}"    GEAR="${MAGENTA}⚙${NC}"
 # ========================== ПЕРЕМЕННЫЕ УСТАНОВКИ ============================
 RUN_WIZARD=true
 
-# Все опции — независимые флаги
 OPT_ZRAM=true
 OPT_EMMC_TUNING=true
 OPT_USB_POWER=true
@@ -66,6 +65,8 @@ SILENT=false
 SHOW_STATUS=false
 HA_MACHINE="$HA_DEFAULT_MACHINE"
 MACHINE_EXPLICIT=false
+OVERRIDE_OS_AGENT_VER=""
+OVERRIDE_HA_VER=""
 LOG_FILE=""
 LOGGING_ACTIVE=false
 
@@ -77,7 +78,6 @@ header() {
     local visible_len=${#text}
     local pad=$((inner_width - visible_len - 2))
     [ $pad -lt 0 ] && pad=0
-
     echo -e "\n${BLUE}╔${border}╗${NC}"
     echo -e "${BLUE}║${WHITE}${BOLD}  ${text}$(printf '%*s' $pad '')${NC}${BLUE}║${NC}"
     echo -e "${BLUE}╚${border}╝${NC}\n"
@@ -183,13 +183,10 @@ run_cmd() {
     msg_action "${desc}..."
     if [ "$DRY_RUN" = true ]; then
         msg_dim "[dry-run] $*"
-        rm -f "$lfile"
-        return 0
+        rm -f "$lfile"; return 0
     fi
     if "$@" > "$lfile" 2>&1; then
-        msg_ok "$desc"
-        rm -f "$lfile"
-        return 0
+        msg_ok "$desc"; rm -f "$lfile"; return 0
     else
         local c=$?
         msg_error "${desc} — ОШИБКА (код ${c})"
@@ -222,13 +219,11 @@ download_file() {
         if wget -q --timeout=60 --tries=1 -O "$output" "$url" 2>/dev/null && [ -s "$output" ]; then
             if [[ "$output" == *.deb ]]; then
                 if dpkg-deb --info "$output" &>/dev/null; then
-                    msg_ok "${desc}"
-                    return 0
+                    msg_ok "${desc}"; return 0
                 fi
                 msg_warn "Файл .deb повреждён, повтор..."
             else
-                msg_ok "${desc}"
-                return 0
+                msg_ok "${desc}"; return 0
             fi
         else
             msg_warn "Ошибка загрузки"
@@ -239,31 +234,48 @@ download_file() {
     return 1
 }
 
+# ── Многоуровневый детект версии (4 уровня) ──
 get_latest_release() {
     local repo="$1"
     local version=""
 
-    # Уровень 1: GitHub API
+    # Уровень 1: GitHub API + jq
     if command -v curl &>/dev/null && command -v jq &>/dev/null; then
         version=$(curl -fsSL --timeout 15 \
             "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
             | jq -r '.tag_name // empty' 2>/dev/null) || true
+        version=$(echo "$version" | tr -d '[:space:]')
     fi
 
-    # Уровень 2: redirect-URL (не лимитируется)
+    # Уровень 2: curl -L → финальный URL после всех редиректов (самый надёжный)
     if [ -z "$version" ] && command -v curl &>/dev/null; then
-        version=$(curl -fsSI --timeout 15 \
+        local final_url=""
+        final_url=$(curl -sL --timeout 15 -o /dev/null \
+            -w '%{url_effective}' \
+            "https://github.com/${repo}/releases/latest" 2>/dev/null) || true
+        if [ -n "$final_url" ]; then
+            version=$(echo "$final_url" | sed 's|.*/tag/||' | tr -d '[:space:]')
+        fi
+    fi
+
+    # Уровень 3: curl -sI → парсинг Location (без -f)
+    if [ -z "$version" ] && command -v curl &>/dev/null; then
+        version=$(curl -sI --timeout 15 \
             "https://github.com/${repo}/releases/latest" 2>/dev/null \
             | grep -i '^location:' \
-            | sed 's|.*/tag/||; s|[[:space:]]||g') || true
+            | head -1 \
+            | sed 's|.*/tag/||' \
+            | tr -d '[:space:]') || true
     fi
 
-    # Уровень 3: wget
+    # Уровень 4: wget → парсинг Location
     if [ -z "$version" ] && command -v wget &>/dev/null; then
-        version=$(wget -q --timeout=15 --max-redirect=0 \
+        version=$(wget -q --timeout=15 --max-redirect=0 -S \
             "https://github.com/${repo}/releases/latest" 2>&1 \
-            | grep -i 'Location' \
-            | sed 's|.*/tag/||; s|[[:space:]]||g') || true
+            | grep -i 'Location:' \
+            | head -1 \
+            | sed 's|.*/tag/||' \
+            | tr -d '[:space:]') || true
     fi
 
     echo "$version"
@@ -300,11 +312,9 @@ detect_machine_type() {
 }
 
 get_cpu_temp() {
-    if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
-        echo "$(( $(cat /sys/class/thermal/thermal_zone0/temp) / 1000 ))"
-    else
-        echo ""
-    fi
+    [ -f /sys/class/thermal/thermal_zone0/temp ] \
+        && echo "$(( $(cat /sys/class/thermal/thermal_zone0/temp) / 1000 ))" \
+        || echo ""
 }
 
 # ========================== МАСТЕР TUI ======================================
@@ -313,49 +323,38 @@ run_wizard() {
         apt-get update -qq && apt-get install -y whiptail -qq
     fi
 
-    # ── Приветствие ──
     whiptail --title "HA Ultimate Installer v${SCRIPT_VERSION}" --msgbox \
-        "Добро пожаловать в установщик Home Assistant Supervised\nдля TV-боксов и SBC.\n\nСледующий экран — выбор компонентов.\nОбязательное ядро (Docker, OS-Agent, HA) ставится всегда." 13 62
+        "Добро пожаловать в установщик Home Assistant Supervised\nдля TV-боксов и SBC.\n\nОбязательное ядро (Docker, OS-Agent, HA) ставится всегда.\nНа следующем экране выберите дополнительные модули." 13 64
 
-    # ── Единый чеклист ──
     local current_ip current_gw
     current_ip=$(hostname -I 2>/dev/null | awk '{print $1}') || current_ip="н/д"
     current_gw=$(ip route 2>/dev/null | awk '/default/{print $3}' | head -1) || current_gw="н/д"
 
     local choices
     choices=$(whiptail --title "Компоненты установки" --checklist \
-        "Пробел — выбор/снятие, Enter — подтвердить\n\n── Производительность ──" 30 72 16 \
-        "ZRAM"      "Swap в RAM (защита eMMC от износа)"       ON  \
-        "EMMC"      "Тюнинг eMMC/SD (noatime, journal, IO)"   ON  \
-        "USBPOWER"  "USB power fix (Zigbee/Z-Wave стики)"     ON  \
-        "─────1"    "── Безопасность ──────────────────────"   OFF \
-        "UFW"       "Firewall UFW + Fail2Ban + DOCKER-USER"   ON  \
-        "SSHHARD"   "SSH hardening (лимит попыток, no X11)"   ON  \
-        "AUTOUPD"   "Автообновления безопасности"              ON  \
-        "─────2"    "── Мониторинг и сервисы ──────────────"   OFF \
-        "WATCHDOG"  "Watchdog + Очистка + Авторесторе сети"   ON  \
-        "THERMAL"   "Мониторинг температуры CPU"               ON  \
-        "BACKUP"    "Еженедельный бэкап конфигурации HA"       ON  \
-        "HACS"      "Магазин интеграций HACS"                  ON  \
-        "─────3"    "── Сеть и уведомления ────────────────"   OFF \
-        "HOSTNAME"  "Hostname → homeassistant.local"           ON  \
-        "STATICIP"  "Статический IP (сейчас: ${current_ip})"  OFF \
-        "TELEGRAM"  "Уведомления в Telegram"                   OFF \
+        "Пробел — выбор/снятие, Enter — подтвердить" 30 72 16 \
+        "ZRAM"      "▸ Swap в RAM (защита eMMC)"               ON  \
+        "EMMC"      "▸ Тюнинг eMMC/SD (noatime, journal, IO)"  ON  \
+        "USBPOWER"  "▸ USB power fix (Zigbee/Z-Wave)"          ON  \
+        "─────1"    "──── Безопасность ───────────────────"     OFF \
+        "UFW"       "▸ Firewall UFW + Fail2Ban + DOCKER-USER"  ON  \
+        "SSHHARD"   "▸ SSH hardening (лимит попыток, no X11)"  ON  \
+        "AUTOUPD"   "▸ Автообновления безопасности"             ON  \
+        "─────2"    "──── Мониторинг и сервисы ────────────"    OFF \
+        "WATCHDOG"  "▸ Watchdog + Очистка + Авторесторе сети"  ON  \
+        "THERMAL"   "▸ Мониторинг температуры CPU"              ON  \
+        "BACKUP"    "▸ Еженедельный бэкап конфигурации HA"      ON  \
+        "HACS"      "▸ Магазин интеграций HACS"                 ON  \
+        "─────3"    "──── Сеть и уведомления ──────────────"    OFF \
+        "HOSTNAME"  "▸ Hostname → homeassistant.local"          ON  \
+        "STATICIP"  "▸ Статический IP (сейчас: ${current_ip})" OFF \
+        "TELEGRAM"  "▸ Уведомления в Telegram"                  OFF \
         3>&1 1>&2 2>&3) || { echo "Установка отменена."; exit 0; }
 
-    # Разбор выбора (разделители игнорируются)
-    OPT_ZRAM=false
-    OPT_EMMC_TUNING=false
-    OPT_USB_POWER=false
-    OPT_UFW=false
-    OPT_SSH_HARDENING=false
-    OPT_AUTOUPDATE=false
-    OPT_WATCHDOG=false
-    OPT_THERMAL=false
-    OPT_BACKUP=false
-    OPT_HACS=false
-    OPT_HOSTNAME=false
-    OPT_STATIC_IP=false
+    OPT_ZRAM=false;   OPT_EMMC_TUNING=false; OPT_USB_POWER=false
+    OPT_UFW=false;    OPT_SSH_HARDENING=false; OPT_AUTOUPDATE=false
+    OPT_WATCHDOG=false; OPT_THERMAL=false;    OPT_BACKUP=false
+    OPT_HACS=false;   OPT_HOSTNAME=false;     OPT_STATIC_IP=false
     OPT_TELEGRAM=false
 
     [[ $choices == *"ZRAM"* ]]     && OPT_ZRAM=true
@@ -372,37 +371,28 @@ run_wizard() {
     [[ $choices == *"STATICIP"* ]] && OPT_STATIC_IP=true
     [[ $choices == *"TELEGRAM"* ]] && OPT_TELEGRAM=true
 
-    # ── Доп. вопросы: Static IP ──
+    # Static IP — доп. вопросы
     if [ "$OPT_STATIC_IP" = true ]; then
         STATIC_IP=$(whiptail --title "Статический IP" --inputbox \
-            "IP-адрес (с маской /24):" 10 50 "$current_ip" \
-            3>&1 1>&2 2>&3) || { OPT_STATIC_IP=false; }
-
+            "IP-адрес:" 10 50 "$current_ip" 3>&1 1>&2 2>&3) || { OPT_STATIC_IP=false; }
         if [ "$OPT_STATIC_IP" = true ]; then
             STATIC_GW=$(whiptail --title "Шлюз" --inputbox \
-                "Адрес шлюза:" 10 50 "$current_gw" \
-                3>&1 1>&2 2>&3) || STATIC_GW="$current_gw"
+                "Адрес шлюза:" 10 50 "$current_gw" 3>&1 1>&2 2>&3) || STATIC_GW="$current_gw"
             STATIC_DNS=$(whiptail --title "DNS" --inputbox \
-                "DNS-серверы (через запятую):" 10 50 "8.8.8.8,1.1.1.1" \
-                3>&1 1>&2 2>&3) || STATIC_DNS="8.8.8.8,1.1.1.1"
+                "DNS-серверы (через запятую):" 10 50 "8.8.8.8,1.1.1.1" 3>&1 1>&2 2>&3) || STATIC_DNS="8.8.8.8,1.1.1.1"
         fi
     fi
 
-    # ── Доп. вопросы: Telegram ──
+    # Telegram — доп. вопросы
     if [ "$OPT_TELEGRAM" = true ]; then
-        TG_TOKEN=$(whiptail --title "Telegram: Токен бота" --inputbox \
-            "Токен от @BotFather:" 10 60 \
-            3>&1 1>&2 2>&3) || TG_TOKEN=""
+        TG_TOKEN=$(whiptail --title "Telegram: Токен" --inputbox \
+            "Токен от @BotFather:" 10 60 3>&1 1>&2 2>&3) || TG_TOKEN=""
         TG_CHAT=$(whiptail --title "Telegram: Chat ID" --inputbox \
-            "Chat ID от @userinfobot:" 10 60 \
-            3>&1 1>&2 2>&3) || TG_CHAT=""
-
-        if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; then
-            OPT_TELEGRAM=false
-        fi
+            "Chat ID от @userinfobot:" 10 60 3>&1 1>&2 2>&3) || TG_CHAT=""
+        [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ] && OPT_TELEGRAM=false
     fi
 
-    # ── Сводка перед стартом ──
+    # Сводка
     local summary="Будет установлено:\n\n"
     summary+="  ✔ Home Assistant Supervised (ядро)\n"
     summary+="  ✔ Docker + OS-Agent\n"
@@ -421,10 +411,8 @@ run_wizard() {
     [ "$OPT_TELEGRAM" = true ]      && summary+="  ✔ Telegram-уведомления\n"
     summary+="\nНачать установку?"
 
-    if ! whiptail --title "Подтверждение" --yesno "$summary" 26 56; then
-        echo "Установка отменена."
-        exit 0
-    fi
+    whiptail --title "Подтверждение" --yesno "$summary" 26 56 \
+        || { echo "Установка отменена."; exit 0; }
 }
 
 # ========================== PRE-FLIGHT ======================================
@@ -436,113 +424,61 @@ step_preflight() {
 
     local errors=0 warnings=0
 
-    # Архитектура
-    local arch
-    arch=$(detect_arch)
-    if [ "$arch" = "unknown" ]; then
-        msg_error "Неподдерживаемая архитектура: $(uname -m)"
-        errors=$((errors+1))
-    else
-        msg_ok "Архитектура: $(uname -m) (${arch})"
-    fi
+    local arch; arch=$(detect_arch)
+    [ "$arch" = "unknown" ] \
+        && { msg_error "Неподдерживаемая архитектура: $(uname -m)"; errors=$((errors+1)); } \
+        || msg_ok "Архитектура: $(uname -m) (${arch})"
 
-    # Диск
-    local free_mb
-    free_mb=$(df -m / | awk 'NR==2{print $4}')
+    local free_mb; free_mb=$(df -m / | awk 'NR==2{print $4}')
     if [ "$free_mb" -lt 4000 ]; then
-        msg_error "Мало места: ${free_mb}MB (нужно ≥ 4GB)"
-        errors=$((errors+1))
+        msg_error "Мало места: ${free_mb}MB (нужно ≥ 4GB)"; errors=$((errors+1))
     elif [ "$free_mb" -lt 6000 ]; then
-        msg_warn "Места маловато: ${free_mb}MB (рекомендуется ≥ 6GB)"
-        warnings=$((warnings+1))
-    else
-        msg_ok "Диск: ${free_mb}MB свободно"
-    fi
+        msg_warn "Места маловато: ${free_mb}MB (рекомендуется ≥ 6GB)"; warnings=$((warnings+1))
+    else msg_ok "Диск: ${free_mb}MB свободно"; fi
 
-    # RAM
-    local ram_mb
-    ram_mb=$(free -m | awk '/Mem:/{print $2}')
+    local ram_mb; ram_mb=$(free -m | awk '/Mem:/{print $2}')
     if [ "$ram_mb" -lt 900 ]; then
-        msg_error "Мало RAM: ${ram_mb}MB (нужно ≥ 1GB)"
-        errors=$((errors+1))
+        msg_error "Мало RAM: ${ram_mb}MB (нужно ≥ 1GB)"; errors=$((errors+1))
     elif [ "$ram_mb" -lt 1800 ]; then
-        msg_warn "RAM: ${ram_mb}MB (рекомендуется ≥ 2GB)"
-        warnings=$((warnings+1))
-    else
-        msg_ok "RAM: ${ram_mb}MB"
-    fi
+        msg_warn "RAM: ${ram_mb}MB (рекомендуется ≥ 2GB)"; warnings=$((warnings+1))
+    else msg_ok "RAM: ${ram_mb}MB"; fi
 
-    # Ядро
-    local kver
-    kver=$(uname -r | cut -d. -f1)
+    local kver; kver=$(uname -r | cut -d. -f1)
     if [ "$kver" -lt 4 ]; then
-        msg_error "Ядро $(uname -r) слишком старое (нужно ≥ 4.x)"
-        errors=$((errors+1))
+        msg_error "Ядро $(uname -r) слишком старое (≥ 4.x)"; errors=$((errors+1))
     elif [ "$kver" -lt 5 ]; then
-        msg_warn "Ядро $(uname -r) (рекомендуется ≥ 5.x)"
-        warnings=$((warnings+1))
-    else
-        msg_ok "Ядро: $(uname -r)"
-    fi
+        msg_warn "Ядро $(uname -r) (рекомендуется ≥ 5.x)"; warnings=$((warnings+1))
+    else msg_ok "Ядро: $(uname -r)"; fi
 
-    # cgroups
-    if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
-        msg_ok "cgroups: v2"
-    elif [ -d /sys/fs/cgroup/unified ]; then
-        msg_ok "cgroups: hybrid"
-    else
-        msg_warn "cgroups: v1 (может потребовать миграции)"
-        warnings=$((warnings+1))
-    fi
+    if [ -f /sys/fs/cgroup/cgroup.controllers ]; then msg_ok "cgroups: v2"
+    elif [ -d /sys/fs/cgroup/unified ]; then msg_ok "cgroups: hybrid"
+    else msg_warn "cgroups: v1"; warnings=$((warnings+1)); fi
 
-    # Интернет
-    if ping -c 1 -W 5 github.com >/dev/null 2>&1; then
-        msg_ok "Интернет: github.com доступен"
+    if ping -c 1 -W 5 github.com >/dev/null 2>&1; then msg_ok "Интернет: OK"
     elif ping -c 1 -W 5 8.8.8.8 >/dev/null 2>&1; then
-        msg_warn "Интернет есть, но DNS может не работать"
-        warnings=$((warnings+1))
-    else
-        msg_error "Нет доступа к интернету"
-        errors=$((errors+1))
-    fi
+        msg_warn "Интернет есть, DNS может не работать"; warnings=$((warnings+1))
+    else msg_error "Нет интернета"; errors=$((errors+1)); fi
 
-    # Порт 8123
-    if ss -tlnp 2>/dev/null | grep -q ':8123 '; then
-        msg_warn "Порт 8123 уже занят!"
-        warnings=$((warnings+1))
-    else
-        msg_ok "Порт 8123: свободен"
-    fi
+    ss -tlnp 2>/dev/null | grep -q ':8123 ' \
+        && { msg_warn "Порт 8123 занят!"; warnings=$((warnings+1)); } \
+        || msg_ok "Порт 8123: свободен"
 
-    # Конфликтующие web-серверы
     for svc in apache2 nginx lighttpd; do
-        if systemctl is-active --quiet "$svc" 2>/dev/null; then
-            msg_warn "Запущен ${svc} — может конфликтовать"
-            warnings=$((warnings+1))
-        fi
+        systemctl is-active --quiet "$svc" 2>/dev/null && \
+            { msg_warn "${svc} запущен — может конфликтовать"; warnings=$((warnings+1)); }
     done
 
-    # Температура
-    local temp
-    temp=$(get_cpu_temp)
-    if [ -n "$temp" ]; then
-        if [ "$temp" -ge 75 ]; then
-            msg_warn "CPU: ${temp}°C — перегрев!"
-            warnings=$((warnings+1))
-        else
-            msg_ok "CPU: ${temp}°C"
-        fi
-    fi
+    local temp; temp=$(get_cpu_temp)
+    [ -n "$temp" ] && { [ "$temp" -ge 75 ] \
+        && { msg_warn "CPU: ${temp}°C — перегрев!"; warnings=$((warnings+1)); } \
+        || msg_ok "CPU: ${temp}°C"; }
 
     separator
     if [ $errors -gt 0 ]; then
-        msg_error "Критических проблем: ${errors}"
-        return 1
+        msg_error "Критических проблем: ${errors}"; return 1
     elif [ $warnings -gt 0 ]; then
         msg_warn "Предупреждений: ${warnings} (установка возможна)"
-    else
-        msg_ok "Все проверки пройдены"
-    fi
+    else msg_ok "Все проверки пройдены"; fi
 
     mark_done "$sid"
 }
@@ -566,40 +502,27 @@ do_check() {
     separator
 
     echo -e "  ${BOLD}Компоненты${NC}"
-    if command -v docker &>/dev/null; then
-        msg_ok  "Docker:        $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')"
-    else
-        msg_error "Docker:        не установлен"
-    fi
+    command -v docker &>/dev/null \
+        && msg_ok  "Docker:        $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')" \
+        || msg_error "Docker:        не установлен"
 
-    if command -v gdbus &>/dev/null && \
-       gdbus introspect --system --dest io.hass.os --object-path /io/hass/os &>/dev/null 2>&1; then
-        msg_ok  "OS-Agent:      активен"
-    else
-        msg_warn "OS-Agent:      не найден / не активен"
-    fi
+    command -v gdbus &>/dev/null && \
+        gdbus introspect --system --dest io.hass.os --object-path /io/hass/os &>/dev/null 2>&1 \
+        && msg_ok  "OS-Agent:      активен" \
+        || msg_warn "OS-Agent:      не найден / не активен"
 
-    local ha_sup
-    ha_sup=$(systemctl is-active hassio-supervisor 2>/dev/null) || ha_sup="не найден"
-    if [ "$ha_sup" = "active" ]; then
-        msg_ok  "Supervisor:    ${ha_sup}"
-    else
-        msg_error "Supervisor:    ${ha_sup}"
-    fi
+    local ha_sup; ha_sup=$(systemctl is-active hassio-supervisor 2>/dev/null) || ha_sup="не найден"
+    [ "$ha_sup" = "active" ] && msg_ok "Supervisor: ${ha_sup}" || msg_error "Supervisor: ${ha_sup}"
 
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^homeassistant$'; then
-        local ha_status ha_started
-        ha_status=$(docker inspect -f '{{.State.Status}}' homeassistant 2>/dev/null) || ha_status="?"
-        ha_started=$(docker inspect -f '{{.State.StartedAt}}' homeassistant 2>/dev/null | cut -d. -f1) || ha_started=""
-        msg_ok  "HA Core:       ${ha_status} (с ${ha_started})"
-    else
-        msg_error "HA Core:       контейнер не найден"
-    fi
+        local hs ht
+        hs=$(docker inspect -f '{{.State.Status}}' homeassistant 2>/dev/null) || hs="?"
+        ht=$(docker inspect -f '{{.State.StartedAt}}' homeassistant 2>/dev/null | cut -d. -f1) || ht=""
+        msg_ok  "HA Core:       ${hs} (с ${ht})"
+    else msg_error "HA Core:       контейнер не найден"; fi
 
-    local aa
-    aa=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null) || aa="N"
+    local aa; aa=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null) || aa="N"
     [ "$aa" = "Y" ] && msg_ok "AppArmor: активен" || msg_warn "AppArmor: выключен"
-
     msg_info "NetworkManager: $(systemctl is-active NetworkManager 2>/dev/null || echo '?')"
     separator
 
@@ -608,18 +531,15 @@ do_check() {
     msg_info "Swap:          $(free -h | awk '/Swap:/{printf "%s / %s", $3, $2}')"
     msg_info "Диск /:        $(df -h / | awk 'NR==2{printf "%s / %s (%s)", $3, $2, $5}')"
     msg_info "Нагрузка:     $(uptime | awk -F'load average:' '{print $2}')"
-
     command -v zramctl &>/dev/null && zramctl 2>/dev/null | grep -q '/dev/zram' && msg_ok "ZRAM: активен"
     separator
 
     echo -e "  ${BOLD}Контейнеры${NC}"
     if command -v docker &>/dev/null; then
-        docker ps --format '  {{.Names}}|{{.Status}}' 2>/dev/null | while IFS='|' read -r name status; do
-            if echo "$status" | grep -q "Up"; then
-                echo -e "  ${CHECK}  ${name}  ${DIM}${status}${NC}"
-            else
-                echo -e "  ${CROSS}  ${name}  ${RED}${status}${NC}"
-            fi
+        docker ps --format '  {{.Names}}|{{.Status}}' 2>/dev/null | while IFS='|' read -r n s; do
+            echo "$s" | grep -q "Up" \
+                && echo -e "  ${CHECK}  ${n}  ${DIM}${s}${NC}" \
+                || echo -e "  ${CROSS}  ${n}  ${RED}${s}${NC}"
         done
     fi
     separator
@@ -627,22 +547,29 @@ do_check() {
     if [ -f "$STATE_FILE" ]; then
         echo -e "  ${BOLD}Пройденные шаги${NC}"
         while IFS= read -r s; do msg_ok "  $s"; done < "$STATE_FILE"
-    else
-        msg_dim "Установка ещё не запускалась"
-    fi
+    else msg_dim "Установка ещё не запускалась"; fi
 
     if [ -d "$HA_BACKUP_DIR" ]; then
-        local bcount
-        bcount=$(find "$HA_BACKUP_DIR" -name "ha_config_*.tar.gz" 2>/dev/null | wc -l)
-        if [ "$bcount" -gt 0 ]; then
-            local last_backup last_size
-            last_backup=$(ls -1t "$HA_BACKUP_DIR"/ha_config_*.tar.gz 2>/dev/null | head -1)
-            last_size=$(du -sh "$last_backup" 2>/dev/null | awk '{print $1}')
+        local bc; bc=$(find "$HA_BACKUP_DIR" -name "ha_config_*.tar.gz" 2>/dev/null | wc -l)
+        if [ "$bc" -gt 0 ]; then
+            local lb lsz
+            lb=$(ls -1t "$HA_BACKUP_DIR"/ha_config_*.tar.gz 2>/dev/null | head -1)
+            lsz=$(du -sh "$lb" 2>/dev/null | awk '{print $1}')
             separator
             echo -e "  ${BOLD}Бэкапы${NC}"
-            msg_info "Всего: ${bcount}, последний: ${last_size}"
+            msg_info "Всего: ${bc}, последний: ${lsz}"
         fi
     fi
+
+    # Версии на GitHub
+    separator
+    echo -e "  ${BOLD}Актуальные версии (GitHub)${NC}"
+    local v_oa v_ha
+    v_oa=$(get_latest_release "home-assistant/os-agent")
+    v_ha=$(get_latest_release "home-assistant/supervised-installer")
+    [ -n "$v_oa" ] && msg_info "OS-Agent:      ${v_oa}" || msg_warn "OS-Agent:      не удалось определить"
+    [ -n "$v_ha" ] && msg_info "HA Supervised: ${v_ha}" || msg_warn "HA Supervised: не удалось определить"
+
     echo ""
 }
 
@@ -663,19 +590,16 @@ do_status() {
         separator
 
         echo -e "  ${BOLD}Контейнеры:${NC}"
-        docker ps --format '  {{.Names}}|{{.Status}}' 2>/dev/null | while IFS='|' read -r name status; do
-            if echo "$status" | grep -q "Up"; then
-                echo -e "  ${CHECK}  ${name}  ${DIM}${status}${NC}"
-            else
-                echo -e "  ${CROSS}  ${name}  ${RED}${status}${NC}"
-            fi
+        docker ps --format '  {{.Names}}|{{.Status}}' 2>/dev/null | while IFS='|' read -r n s; do
+            echo "$s" | grep -q "Up" \
+                && echo -e "  ${CHECK}  ${n}  ${DIM}${s}${NC}" \
+                || echo -e "  ${CROSS}  ${n}  ${RED}${s}${NC}"
         done
 
-        local ha_http
-        ha_http=$(curl -s -o /dev/null -w "%{http_code}" -m 3 http://localhost:8123 2>/dev/null || echo 000)
+        local hh; hh=$(curl -s -o /dev/null -w "%{http_code}" -m 3 http://localhost:8123 2>/dev/null || echo 000)
         separator
-        [ "$ha_http" != "000" ] \
-            && echo -e "  ${CHECK}  HA HTTP: ${GREEN}${ha_http}${NC}" \
+        [ "$hh" != "000" ] \
+            && echo -e "  ${CHECK}  HA HTTP: ${GREEN}${hh}${NC}" \
             || echo -e "  ${CROSS}  HA HTTP: ${RED}не отвечает${NC}"
 
         separator
@@ -696,8 +620,7 @@ do_uninstall() {
             && confirmed=true
     else
         echo -en " ${WARN}  ${YELLOW}Удалить HA Supervised? (yes/no): ${NC}"
-        read -r confirm
-        [ "$confirm" = "yes" ] && confirmed=true
+        read -r c; [ "$c" = "yes" ] && confirmed=true
     fi
     [ "$confirmed" != true ] && { msg_info "Отменено."; exit 0; }
 
@@ -724,7 +647,6 @@ do_uninstall() {
     rm -rf /etc/systemd/system/hassio-supervisor.service.d 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
 
-    msg_action "Удаление пакетов..."
     dpkg --purge homeassistant-supervised os-agent 2>/dev/null || true
 
     msg_action "Удаление скриптов..."
@@ -735,24 +657,20 @@ do_uninstall() {
     rm -f /etc/sysctl.d/99-ha-swap.conf 2>/dev/null || true
     rm -f /etc/systemd/journald.conf.d/ha-tuning.conf 2>/dev/null || true
 
-    # DOCKER-USER
-    if [ -f /etc/ufw/after.rules ]; then
+    [ -f /etc/ufw/after.rules ] && {
         sed -i '/# BEGIN HA-INSTALLER DOCKER-USER/,/# END HA-INSTALLER DOCKER-USER/d' \
             /etc/ufw/after.rules 2>/dev/null || true
         ufw reload 2>/dev/null || true
-    fi
+    }
 
-    # Данные
     if [ -d "$HASSIO_DIR" ]; then
-        msg_warn "Каталог $HASSIO_DIR содержит данные HA."
-        echo -en " ${WARN}  ${YELLOW}Удалить данные? (yes/no): ${NC}"
+        echo -en " ${WARN}  ${YELLOW}Удалить данные HA ($HASSIO_DIR)? (yes/no): ${NC}"
         read -r cd; [ "$cd" = "yes" ] && { rm -rf "$HASSIO_DIR"; msg_ok "Данные удалены"; } \
             || msg_info "Данные сохранены"
     fi
 
     if [ -d "$HA_BACKUP_DIR" ]; then
-        msg_warn "Каталог $HA_BACKUP_DIR содержит бэкапы."
-        echo -en " ${WARN}  ${YELLOW}Удалить бэкапы? (yes/no): ${NC}"
+        echo -en " ${WARN}  ${YELLOW}Удалить бэкапы ($HA_BACKUP_DIR)? (yes/no): ${NC}"
         read -r cb; [ "$cb" = "yes" ] && { rm -rf "$HA_BACKUP_DIR"; msg_ok "Бэкапы удалены"; } \
             || msg_info "Бэкапы сохранены"
     fi
@@ -765,7 +683,7 @@ do_uninstall() {
     rm -f "$GRACE_MARKER" 2>/dev/null || true
 
     header "УДАЛЕНИЕ ЗАВЕРШЕНО"
-    msg_info "Docker оставлен. Удаление: apt-get purge docker-ce docker-ce-cli containerd.io"
+    msg_info "Docker оставлен. Удаление: apt purge docker-ce docker-ce-cli containerd.io"
     echo ""
 }
 
@@ -779,16 +697,20 @@ ${BOLD}Использование:${NC}
   sudo ./install.sh              Мастер установки (TUI)
   sudo ./install.sh [ОПЦИИ]
 
-${BOLD}Опции:${NC}
+${BOLD}Основные:${NC}
   -h, --help          Справка
   -c, --check         Диагностика
   -s, --status        Живой мониторинг (каждые 5 сек)
   -u, --uninstall     Удалить HA Supervised
   --reset-state       Сбросить шаги
+
+${BOLD}Установка:${NC}
   --skip-update       Без apt update/upgrade
   --dry-run           Тестовый прогон
-  --silent            Тихий режим
+  --silent            Тихий режим (ошибки выводятся)
   --machine TYPE      Тип машины (см. ниже)
+  --os-agent-ver X    Версия OS-Agent вручную (если GitHub недоступен)
+  --ha-ver X          Версия HA Supervised вручную
 
 ${BOLD}Типы машин:${NC}
   qemuarm-64          TV-боксы / неизвестные SBC (по умолчанию)
@@ -802,11 +724,13 @@ ${BOLD}Типы машин:${NC}
   qemuarm             ARMv7 (32-bit)
 
 ${BOLD}Примеры:${NC}
-  sudo ./install.sh                          # Интерактивная
-  sudo ./install.sh --check                  # Диагностика
-  sudo ./install.sh --status                 # Дашборд
-  sudo ./install.sh --silent --skip-update   # Автоматическая
-  sudo ./install.sh --machine odroid-n2      # С платформой
+  sudo ./install.sh                                # TUI мастер
+  sudo ./install.sh --check                        # Диагностика
+  sudo ./install.sh --status                       # Дашборд
+  sudo ./install.sh --silent --skip-update         # Автоматическая
+  sudo ./install.sh --machine odroid-n2            # С платформой
+  sudo ./install.sh --os-agent-ver 1.8.1           # Ручная версия
+  sudo ./install.sh --os-agent-ver 1.8.1 --ha-ver 4.0.1  # Обе вручную
 
 HELP
 }
@@ -826,11 +750,20 @@ parse_args() {
             --dry-run)       DRY_RUN=true ;;
             --silent)        SILENT=true; RUN_WIZARD=false ;;
             --machine)
-                shift
-                [ $# -eq 0 ] && { msg_error "--machine требует аргумент"; exit 1; }
+                shift; [ $# -eq 0 ] && { msg_error "--machine требует аргумент"; exit 1; }
                 HA_MACHINE="$1"; MACHINE_EXPLICIT=true ;;
             --machine=*)
                 HA_MACHINE="${1#*=}"; MACHINE_EXPLICIT=true ;;
+            --os-agent-ver)
+                shift; [ $# -eq 0 ] && { msg_error "--os-agent-ver требует аргумент"; exit 1; }
+                OVERRIDE_OS_AGENT_VER="$1" ;;
+            --os-agent-ver=*)
+                OVERRIDE_OS_AGENT_VER="${1#*=}" ;;
+            --ha-ver)
+                shift; [ $# -eq 0 ] && { msg_error "--ha-ver требует аргумент"; exit 1; }
+                OVERRIDE_HA_VER="$1" ;;
+            --ha-ver=*)
+                OVERRIDE_HA_VER="${1#*=}" ;;
             *)
                 msg_error "Неизвестный параметр: $1"; show_help; exit 1 ;;
         esac
@@ -861,9 +794,7 @@ step_update_system() {
     if [ "$SKIP_UPDATE" = false ]; then
         run_cmd_fatal "apt-get update" apt-get update -y
         run_cmd "apt-get upgrade" apt-get upgrade -y
-    else
-        msg_warn "Обновление пропущено (--skip-update)"
-    fi
+    else msg_warn "Обновление пропущено (--skip-update)"; fi
     mark_done "$sid"
 }
 
@@ -927,8 +858,7 @@ unmanaged-devices=none
 wifi.scan-rand-mac-address=no
 EOF
 
-    [ -f /etc/network/interfaces ] && \
-        cp /etc/network/interfaces "$BACKUP_DIR/interfaces.bak" 2>/dev/null || true
+    [ -f /etc/network/interfaces ] && cp /etc/network/interfaces "$BACKUP_DIR/interfaces.bak" 2>/dev/null || true
 
     cat > /etc/network/interfaces << 'EOF'
 source /etc/network/interfaces.d/*
@@ -941,8 +871,7 @@ EOF
     systemctl start systemd-resolved 2>/dev/null || true
     ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null || true
 
-    who 2>/dev/null | grep -q pts && \
-        msg_warn "SSH-сессия обнаружена. Сеть может кратковременно прерваться."
+    who 2>/dev/null | grep -q pts && msg_warn "SSH-сессия. Сеть может кратковременно прерваться."
 
     msg_action "Переключение на NetworkManager..."
     systemctl disable networking 2>/dev/null || true
@@ -951,7 +880,7 @@ EOF
 
     # Статический IP
     if [ "$OPT_STATIC_IP" = true ] && [ -n "$STATIC_IP" ]; then
-        msg_action "Назначение статического IP: ${STATIC_IP}..."
+        msg_action "Статический IP: ${STATIC_IP}..."
         sleep 3
         local active_con
         active_con=$(nmcli -t -f NAME con show --active 2>/dev/null | head -1) || active_con=""
@@ -963,35 +892,25 @@ EOF
                 ipv4.method manual 2>/dev/null
             nmcli con up "$active_con" 2>/dev/null || true
             msg_ok "Статический IP: ${STATIC_IP}"
-        else
-            msg_warn "Нет активного соединения — статический IP не назначен"
-        fi
+        else msg_warn "Нет активного соединения — IP не назначен"; fi
     fi
 
-    # Ожидание сети
     msg_action "Ожидание стабилизации сети..."
     local retries=0 new_ip=""
     while [ $retries -lt 6 ]; do
         sleep 5
         new_ip=$(hostname -I 2>/dev/null | awk '{print $1}') || new_ip=""
         [ -n "$new_ip" ] && { msg_ok "Сеть стабильна — IP: ${new_ip}"; break; }
-        retries=$((retries + 1))
-        msg_dim "Ожидание ${retries}/6..."
+        retries=$((retries+1)); msg_dim "Ожидание ${retries}/6..."
     done
 
     if [ $retries -ge 6 ]; then
-        msg_error "Сеть не поднялась за 30 секунд!"
-        msg_warn "Попытка восстановления..."
+        msg_error "Сеть не поднялась!"
         systemctl start networking 2>/dev/null || true
-        nmcli networking on 2>/dev/null || true
-        sleep 5
+        nmcli networking on 2>/dev/null || true; sleep 5
         new_ip=$(hostname -I 2>/dev/null | awk '{print $1}') || new_ip=""
-        if [ -n "$new_ip" ]; then
-            msg_ok "Сеть восстановлена — IP: ${new_ip}"
-        else
-            msg_error "Не удалось восстановить сеть!"
-            return 1
-        fi
+        [ -n "$new_ip" ] && msg_ok "Сеть восстановлена: ${new_ip}" \
+            || { msg_error "Сеть не восстановлена!"; return 1; }
     fi
 
     mark_done "$sid"
@@ -1002,11 +921,9 @@ step_configure_apparmor() {
     is_done "$sid" && return 0
     header "ШАГ 4 — APPARMOR"
 
-    local aa=""
-    aa=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null) || aa="N"
+    local aa; aa=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null) || aa="N"
 
-    if [ "$aa" = "Y" ]; then
-        msg_ok "AppArmor уже активен"
+    if [ "$aa" = "Y" ]; then msg_ok "AppArmor уже активен"
     else
         msg_warn "AppArmor выключен. Патчим загрузчик..."
         local patched=false
@@ -1014,21 +931,17 @@ step_configure_apparmor() {
             [ -f "$f" ] || continue
             cp "$f" "${BACKUP_DIR}/$(basename "$f").bak" 2>/dev/null || true
             if grep -q "apparmor=1" "$f"; then
-                msg_dim "$(basename "$f") — уже содержит apparmor=1"
-                patched=true; continue
+                msg_dim "$(basename "$f") — уже пропатчен"; patched=true; continue
             fi
             if [[ "$f" == *extlinux.conf ]]; then
                 sed -i '/^[[:space:]]*append/ s/$/ apparmor=1 security=apparmor/' "$f"
             elif grep -q "^extraargs=" "$f"; then
                 sed -i 's|^extraargs=.*|& apparmor=1 security=apparmor|' "$f"
-            else
-                echo "extraargs=apparmor=1 security=apparmor" >> "$f"
-            fi
-            msg_ok "Пропатчен: $(basename "$f")"
-            patched=true
+            else echo "extraargs=apparmor=1 security=apparmor" >> "$f"; fi
+            msg_ok "Пропатчен: $(basename "$f")"; patched=true
         done
-        [ "$patched" = false ] && msg_error "Не найден файл загрузчика!" \
-            || msg_warn "AppArmor активируется после перезагрузки"
+        [ "$patched" = false ] && msg_error "Файл загрузчика не найден!" \
+            || msg_warn "AppArmor активируется после reboot"
     fi
 
     systemctl enable apparmor 2>/dev/null || true
@@ -1043,12 +956,8 @@ step_performance() {
 
     # ── ZRAM / Swap ──
     if [ "$OPT_ZRAM" = true ]; then
-        msg_action "Настройка ZRAM..."
-        if [ -f /swapfile ]; then
-            swapoff /swapfile 2>/dev/null || true
-            rm -f /swapfile; sed -i '/swapfile/d' /etc/fstab
-            msg_ok "Файловый swap удалён"
-        fi
+        msg_action "ZRAM..."
+        [ -f /swapfile ] && { swapoff /swapfile 2>/dev/null || true; rm -f /swapfile; sed -i '/swapfile/d' /etc/fstab; msg_ok "Файловый swap удалён"; }
         cat > /etc/default/zramswap << 'EOF'
 ALGO=lz4
 PERCENT=60
@@ -1057,36 +966,27 @@ EOF
         systemctl restart zramswap 2>/dev/null || true
         msg_ok "ZRAM активирован"
     else
-        msg_action "Swap (2 GB)..."
+        msg_action "Swap 2GB..."
         if [ ! -f /swapfile ]; then
             if dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none 2>/dev/null \
                || dd if=/dev/zero of=/swapfile bs=1M count=2048 2>/dev/null; then
-                chmod 600 /swapfile; mkswap /swapfile >/dev/null; swapon /swapfile
-                msg_ok "Swapfile 2GB создан"
-            else
-                msg_error "Не удалось создать swapfile"
-                rm -f /swapfile 2>/dev/null || true
-            fi
-        else
-            msg_ok "Swapfile уже существует"
-        fi
+                chmod 600 /swapfile; mkswap /swapfile >/dev/null; swapon /swapfile; msg_ok "Swapfile создан"
+            else msg_error "Swapfile не создан"; rm -f /swapfile 2>/dev/null || true; fi
+        else msg_ok "Swapfile уже есть"; fi
         grep -q "swapfile" /etc/fstab 2>/dev/null || echo '/swapfile none swap sw 0 0' >> /etc/fstab
     fi
 
-    # ── CPU Governor ──
+    # ── CPU ──
     if command -v cpufreq-set &>/dev/null; then
         echo 'GOVERNOR="performance"' > /etc/default/cpufrequtils
-        systemctl restart cpufrequtils 2>/dev/null || true
-        msg_ok "CPU governor: performance"
+        systemctl restart cpufrequtils 2>/dev/null || true; msg_ok "CPU: performance"
     fi
 
-    # ── eMMC/SD тюнинг ──
+    # ── eMMC/SD ──
     if [ "$OPT_EMMC_TUNING" = true ]; then
         msg_action "Тюнинг eMMC/SD..."
-
         echo "vm.swappiness=10" > /etc/sysctl.d/99-ha-swap.conf
-        sysctl -p /etc/sysctl.d/99-ha-swap.conf >/dev/null 2>&1
-        msg_ok "vm.swappiness=10"
+        sysctl -p /etc/sysctl.d/99-ha-swap.conf >/dev/null 2>&1; msg_ok "swappiness=10"
 
         if ! grep -q "noatime" /etc/fstab 2>/dev/null; then
             cp /etc/fstab "${BACKUP_DIR}/fstab.bak" 2>/dev/null || true
@@ -1103,15 +1003,12 @@ MaxRetentionSec=7day
 Compress=yes
 Storage=volatile
 JRNL
-        systemctl restart systemd-journald 2>/dev/null || true
-        msg_ok "journald: volatile, 50MB, 7 дней"
+        systemctl restart systemd-journald 2>/dev/null || true; msg_ok "journald: volatile 50MB"
 
-        local rootdev
-        rootdev=$(lsblk -no PKNAME "$(findmnt -n -o SOURCE /)" 2>/dev/null | head -1) || rootdev=""
+        local rootdev; rootdev=$(lsblk -no PKNAME "$(findmnt -n -o SOURCE /)" 2>/dev/null | head -1) || rootdev=""
         if [ -n "$rootdev" ] && [ -f "/sys/block/${rootdev}/queue/rotational" ]; then
             [ "$(cat "/sys/block/${rootdev}/queue/rotational" 2>/dev/null)" = "0" ] && \
-                echo "none" > "/sys/block/${rootdev}/queue/scheduler" 2>/dev/null && \
-                msg_ok "IO scheduler: none (flash)"
+                echo "none" > "/sys/block/${rootdev}/queue/scheduler" 2>/dev/null && msg_ok "IO: none (flash)"
         fi
     fi
 
@@ -1124,8 +1021,7 @@ JRNL
         cat > /etc/udev/rules.d/99-ha-usb-power.rules << 'UDEV'
 ACTION=="add", SUBSYSTEM=="usb", ATTR{power/autosuspend}="-1"
 UDEV
-        udevadm control --reload-rules 2>/dev/null || true
-        msg_ok "USB autosuspend отключён"
+        udevadm control --reload-rules 2>/dev/null || true; msg_ok "USB autosuspend off"
     fi
 
     mark_done "$sid"
@@ -1137,22 +1033,18 @@ step_install_docker() {
     header "ШАГ 6 — DOCKER"
 
     if command -v docker &>/dev/null; then
-        msg_ok "Docker уже установлен: $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')"
+        msg_ok "Docker: $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')"
     else
         apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
         spinner_start "Установка Docker"
-        local docker_ok=false
-        curl -fsSL https://get.docker.com | sh >/dev/null 2>&1 && docker_ok=true
+        local ok=false; curl -fsSL https://get.docker.com | sh >/dev/null 2>&1 && ok=true
         spinner_stop
-        [ "$docker_ok" = true ] && msg_ok "Docker установлен" || { msg_error "Ошибка Docker"; exit 1; }
+        [ "$ok" = true ] && msg_ok "Docker установлен" || { msg_error "Ошибка Docker"; exit 1; }
     fi
 
     mkdir -p /etc/docker
     [ ! -f /etc/docker/daemon.json ] && cat > /etc/docker/daemon.json << 'EOF'
-{
-    "log-driver": "journald",
-    "storage-driver": "overlay2"
-}
+{ "log-driver": "journald", "storage-driver": "overlay2" }
 EOF
 
     systemctl enable docker 2>/dev/null || true
@@ -1167,13 +1059,32 @@ step_install_os_agent() {
     is_done "$sid" && return 0
     header "ШАГ 7 — OS-AGENT"
 
-    local arch
-    arch=$(detect_arch)
+    local arch; arch=$(detect_arch)
     [ "$arch" = "unknown" ] && { msg_error "Неизвестная архитектура: $(uname -m)"; exit 1; }
 
     local v=""
-    v=$(get_latest_release "home-assistant/os-agent")
-    [ -z "$v" ] && { msg_error "Не удалось определить версию OS-Agent. GitHub недоступен?"; exit 1; }
+    if [ -n "$OVERRIDE_OS_AGENT_VER" ]; then
+        v="$OVERRIDE_OS_AGENT_VER"
+        msg_info "Версия OS-Agent (вручную): ${v}"
+    else
+        msg_action "Определение версии OS-Agent..."
+        v=$(get_latest_release "home-assistant/os-agent")
+    fi
+
+    if [ -z "$v" ]; then
+        msg_error "Не удалось определить версию OS-Agent"
+        msg_warn "Возможные причины:"
+        msg_dim "— GitHub API rate-limit (60 запросов/час)"
+        msg_dim "— Проблемы с DNS или SSL"
+        msg_dim "— Прокси блокирует github.com"
+        echo ""
+        msg_info "Проверьте вручную:"
+        msg_dim "curl -sI https://github.com/home-assistant/os-agent/releases/latest"
+        echo ""
+        msg_info "Или укажите версию явно:"
+        msg_dim "sudo ./install.sh --os-agent-ver 1.8.1"
+        exit 1
+    fi
 
     msg_info "Архитектура: ${arch}, версия: ${v}"
     download_file \
@@ -1207,8 +1118,22 @@ EOF
     msg_ok "os-release → Debian 12"
 
     local v=""
-    v=$(get_latest_release "home-assistant/supervised-installer")
-    [ -z "$v" ] && { msg_error "Не удалось определить версию HA Supervised. GitHub недоступен?"; exit 1; }
+    if [ -n "$OVERRIDE_HA_VER" ]; then
+        v="$OVERRIDE_HA_VER"
+        msg_info "Версия HA (вручную): ${v}"
+    else
+        msg_action "Определение версии HA Supervised..."
+        v=$(get_latest_release "home-assistant/supervised-installer")
+    fi
+
+    if [ -z "$v" ]; then
+        msg_error "Не удалось определить версию HA Supervised"
+        msg_warn "Проверьте:"
+        msg_dim "curl -sI https://github.com/home-assistant/supervised-installer/releases/latest"
+        msg_info "Или:"
+        msg_dim "sudo ./install.sh --ha-ver 4.0.1"
+        exit 1
+    fi
 
     download_file \
         "https://github.com/home-assistant/supervised-installer/releases/download/${v}/homeassistant-supervised.deb" \
@@ -1239,7 +1164,7 @@ DROPIN
     local sw=0
     while ! systemctl is-active --quiet hassio-supervisor 2>/dev/null; do
         sleep 5; sw=$((sw+5))
-        [ $sw -ge 120 ] && { msg_warn "Supervisor не запустился за 2 мин (контейнеры ещё грузятся)"; break; }
+        [ $sw -ge 120 ] && { msg_warn "Supervisor не запустился за 2 мин"; break; }
         [ $((sw % 15)) -eq 0 ] && msg_dim "Ждём ${sw}с..."
     done
     [ $sw -lt 120 ] && msg_ok "hassio-supervisor активен"
@@ -1256,7 +1181,6 @@ step_security() {
 
     local anything=false
 
-    # ── UFW ──
     if [ "$OPT_UFW" = true ]; then
         anything=true
         msg_action "UFW..."
@@ -1264,16 +1188,13 @@ step_security() {
         ufw default deny incoming >/dev/null 2>&1
         ufw default allow outgoing >/dev/null 2>&1
         ufw default allow routed >/dev/null 2>&1
+        ufw allow 22/tcp comment 'SSH' >/dev/null 2>&1
+        ufw allow 8123/tcp comment 'HA' >/dev/null 2>&1
+        ufw allow 4357/tcp comment 'ESPHome' >/dev/null 2>&1
+        ufw allow 5353/udp comment 'mDNS' >/dev/null 2>&1
+        ufw allow 5683/udp comment 'HomeKit' >/dev/null 2>&1
+        ufw --force enable >/dev/null 2>&1; msg_ok "UFW активирован"
 
-        ufw allow 22/tcp   comment 'SSH'            >/dev/null 2>&1
-        ufw allow 8123/tcp comment 'Home Assistant' >/dev/null 2>&1
-        ufw allow 4357/tcp comment 'ESPHome'        >/dev/null 2>&1
-        ufw allow 5353/udp comment 'mDNS'           >/dev/null 2>&1
-        ufw allow 5683/udp comment 'HomeKit'        >/dev/null 2>&1
-        ufw --force enable >/dev/null 2>&1
-        msg_ok "UFW активирован"
-
-        # DOCKER-USER
         if ! grep -q "# BEGIN HA-INSTALLER DOCKER-USER" /etc/ufw/after.rules 2>/dev/null; then
             cat >> /etc/ufw/after.rules << 'UFWD'
 
@@ -1288,27 +1209,23 @@ step_security() {
 COMMIT
 # END HA-INSTALLER DOCKER-USER RULES
 UFWD
-            ufw reload >/dev/null 2>&1
-            msg_ok "DOCKER-USER: только LAN"
+            ufw reload >/dev/null 2>&1; msg_ok "DOCKER-USER: только LAN"
         fi
 
-        # Fail2Ban
         cat > /etc/fail2ban/jail.local << 'EOF'
 [sshd]
-enabled  = true
-port     = ssh
-filter   = sshd
-logpath  = /var/log/auth.log
-maxretry = 5
-bantime  = 3600
-findtime = 600
+enabled=true
+port=ssh
+filter=sshd
+logpath=/var/log/auth.log
+maxretry=5
+bantime=3600
+findtime=600
 EOF
         systemctl enable fail2ban 2>/dev/null || true
-        systemctl restart fail2ban 2>/dev/null || true
-        msg_ok "Fail2Ban: SSH (5 попыток → бан 1ч)"
+        systemctl restart fail2ban 2>/dev/null || true; msg_ok "Fail2Ban: SSH"
     fi
 
-    # ── SSH Hardening ──
     if [ "$OPT_SSH_HARDENING" = true ]; then
         anything=true
         mkdir -p /etc/ssh/sshd_config.d
@@ -1321,10 +1238,9 @@ ClientAliveCountMax 2
 X11Forwarding no
 SSH
         systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
-        msg_ok "SSH hardening (root по ключу, max 3 попытки)"
+        msg_ok "SSH hardening"
     fi
 
-    # ── Автообновления ──
     if [ "$OPT_AUTOUPDATE" = true ]; then
         anything=true
         cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'UPG'
@@ -1358,11 +1274,9 @@ step_extras() {
     # ── Hostname / mDNS ──
     if [ "$OPT_HOSTNAME" = true ]; then
         anything=true
-        hostnamectl set-hostname homeassistant 2>/dev/null || true
-        msg_ok "Hostname: homeassistant"
+        hostnamectl set-hostname homeassistant 2>/dev/null || true; msg_ok "Hostname: homeassistant"
     fi
-    systemctl enable avahi-daemon >/dev/null 2>&1
-    systemctl start avahi-daemon  >/dev/null 2>&1
+    systemctl enable avahi-daemon >/dev/null 2>&1; systemctl start avahi-daemon >/dev/null 2>&1
     msg_ok "mDNS: $(hostname).local"
 
     # ── Telegram ──
@@ -1378,13 +1292,11 @@ curl -s -X POST "https://api.telegram.org/bot\$T/sendMessage" \\
     --data-urlencode "parse_mode=Markdown" >/dev/null 2>&1
 TGNOTIFY
     chmod +x /usr/local/bin/ha-notify
-    [ "$OPT_TELEGRAM" = true ] && msg_ok "Telegram-уведомления настроены" \
-        || msg_dim "Telegram не настроен"
+    [ "$OPT_TELEGRAM" = true ] && msg_ok "Telegram настроен" || msg_dim "Telegram не настроен"
 
     # ── Watchdog + Cleanup + Net-recovery ──
     if [ "$OPT_WATCHDOG" = true ]; then
         anything=true
-
         cat > /usr/local/bin/ha-watchdog << 'WD'
 #!/bin/bash
 GRACE_FILE="/tmp/.ha_just_installed"
@@ -1397,7 +1309,7 @@ FAIL_FILE="/tmp/ha_wd_fails"
 fail=$(cat "$FAIL_FILE" 2>/dev/null || echo 0)
 code=$(curl -s -o /dev/null -w "%{http_code}" -m 10 http://localhost:8123 2>/dev/null || echo 000)
 if [ "$code" = "000" ]; then
-    fail=$((fail + 1)); echo "$fail" > "$FAIL_FILE"
+    fail=$((fail+1)); echo "$fail" > "$FAIL_FILE"
     if [ "$fail" -ge 3 ]; then
         logger -t ha-watchdog "HA не отвечает ($fail). Рестарт..."
         docker restart homeassistant 2>/dev/null || true
@@ -1441,24 +1353,22 @@ NETR
         msg_ok "Watchdog + Очистка + Net-recovery"
     fi
 
-    # ── Мониторинг температуры ──
+    # ── Температура ──
     if [ "$OPT_THERMAL" = true ]; then
         anything=true
         cat > /usr/local/bin/ha-thermal << 'THERMAL'
 #!/bin/bash
-TEMP_FILE="/sys/class/thermal/thermal_zone0/temp"
-[ ! -f "$TEMP_FILE" ] && exit 0
-temp=$(( $(cat "$TEMP_FILE") / 1000 ))
+[ ! -f /sys/class/thermal/thermal_zone0/temp ] && exit 0
+temp=$(( $(cat /sys/class/thermal/thermal_zone0/temp) / 1000 ))
 if [ "$temp" -ge 80 ]; then
-    logger -t ha-thermal "КРИТИЧНО: CPU ${temp}°C!"
+    logger -t ha-thermal "КРИТИЧНО: ${temp}°C!"
     /usr/local/bin/ha-notify "🔥 CPU: ${temp}°C! Проверьте охлаждение!"
 elif [ "$temp" -ge 70 ]; then
     logger -t ha-thermal "CPU ${temp}°C"
-    /usr/local/bin/ha-notify "🌡️ CPU ${temp}°C — близко к троттлингу"
+    /usr/local/bin/ha-notify "🌡️ CPU ${temp}°C — троттлинг"
 fi
 THERMAL
-        chmod +x /usr/local/bin/ha-thermal
-        msg_ok "Мониторинг температуры (70°→warn, 80°→crit)"
+        chmod +x /usr/local/bin/ha-thermal; msg_ok "Мониторинг температуры"
     fi
 
     # ── ha-health ──
@@ -1487,21 +1397,15 @@ docker inspect -f '{{.State.StartedAt}}' homeassistant &>/dev/null 2>&1 && \
     printf "  %-14s %s\n" "Запущен:" "$(docker inspect -f '{{.State.StartedAt}}' homeassistant | cut -d. -f1)"
 echo "============================================="
 HEALTH
-    chmod +x /usr/local/bin/ha-health
-    msg_ok "ha-health: команда диагностики"
+    chmod +x /usr/local/bin/ha-health; msg_ok "ha-health"
 
     # ── Бэкап ──
     if [ "$OPT_BACKUP" = true ]; then
-        anything=true
-        mkdir -p "$HA_BACKUP_DIR"
-
+        anything=true; mkdir -p "$HA_BACKUP_DIR"
         cat > /usr/local/bin/ha-backup << 'BACKUP'
 #!/bin/bash
-BACKUP_DIR="/root/ha-backups"
-HASSIO_DIR="/usr/share/hassio"
-KEEP_DAYS=30
-TS=$(date +%Y%m%d_%H%M%S)
-mkdir -p "$BACKUP_DIR"
+BACKUP_DIR="/root/ha-backups"; HASSIO_DIR="/usr/share/hassio"; KEEP_DAYS=30
+TS=$(date +%Y%m%d_%H%M%S); mkdir -p "$BACKUP_DIR"
 [ ! -d "${HASSIO_DIR}/homeassistant" ] && { logger -t ha-backup "Конфиг не найден"; exit 1; }
 tar czf "${BACKUP_DIR}/ha_config_${TS}.tar.gz" \
     --exclude='*.db' --exclude='*.db-shm' --exclude='*.db-wal' \
@@ -1511,14 +1415,13 @@ tar czf "${BACKUP_DIR}/ha_config_${TS}.tar.gz" \
 find "$BACKUP_DIR" -name "ha_config_*.tar.gz" -mtime +${KEEP_DAYS} -delete 2>/dev/null
 SIZE=$(du -sh "${BACKUP_DIR}/ha_config_${TS}.tar.gz" 2>/dev/null | awk '{print $1}')
 logger -t ha-backup "Бэкап: ${SIZE}"
-/usr/local/bin/ha-notify "💾 Бэкап HA: ${SIZE}"
+/usr/local/bin/ha-notify "💾 Бэкап: ${SIZE}"
 BACKUP
         chmod +x /usr/local/bin/ha-backup
 
         cat > /usr/local/bin/ha-restore << 'RESTORE'
 #!/bin/bash
-BACKUP_DIR="/root/ha-backups"
-HASSIO_DIR="/usr/share/hassio"
+BACKUP_DIR="/root/ha-backups"; HASSIO_DIR="/usr/share/hassio"
 echo "Доступные бэкапы:"
 mapfile -t files < <(ls -1t "$BACKUP_DIR"/ha_config_*.tar.gz 2>/dev/null)
 [ ${#files[@]} -eq 0 ] && { echo "Бэкапы не найдены"; exit 1; }
@@ -1527,21 +1430,21 @@ for i in "${!files[@]}"; do
     printf "  %d) %s (%s)\n" "$((i+1))" "$(basename "${files[$i]}")" "$sz"
 done
 read -p "Номер: " choice
-[[ ! "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#files[@]} ] && { echo "Неверный выбор"; exit 1; }
+[[ ! "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#files[@]} ] && { echo "Неверный"; exit 1; }
 file="${files[$((choice-1))]}"
-read -p "Остановить HA и восстановить из $(basename "$file")? (yes/no): " confirm
+read -p "Восстановить из $(basename "$file")? (yes/no): " confirm
 [ "$confirm" != "yes" ] && { echo "Отменено"; exit 0; }
 docker stop homeassistant 2>/dev/null
 tar xzf "$file" -C "$HASSIO_DIR"
 docker start homeassistant 2>/dev/null
-echo "Готово! HA перезапущен."
+echo "Готово!"
 RESTORE
         chmod +x /usr/local/bin/ha-restore
-        msg_ok "Автобэкап (вс 4:00, хранение 30 дн)"
+        msg_ok "Автобэкап (вс 4:00, 30 дн)"
         msg_dim "Ручной: ha-backup | Восстановление: ha-restore"
     fi
 
-    # ── Cron ──
+    # ── Cron (динамический) ──
     {
         echo "# HA maintenance (v${SCRIPT_VERSION})"
         [ "$OPT_WATCHDOG" = true ] && echo "*/5 * * * *  root /usr/local/bin/ha-watchdog >/dev/null 2>&1"
@@ -1551,7 +1454,7 @@ RESTORE
         [ "$OPT_BACKUP" = true ]   && echo "0 4 * * 0    root /usr/local/bin/ha-backup >/dev/null 2>&1"
     } > /etc/cron.d/ha-tools
     chmod 644 /etc/cron.d/ha-tools
-    msg_ok "Cron-задания зарегистрированы"
+    msg_ok "Cron настроен"
 
     [ "$anything" = false ] && msg_warn "Утилиты: всё пропущено"
     mark_done "$sid"
@@ -1562,33 +1465,24 @@ step_hacs() {
     is_done "$sid" && return 0
     header "ШАГ 11 — HACS"
 
-    if [ "$OPT_HACS" != true ]; then
-        msg_warn "HACS пропущен"
-        mark_done "$sid"; return 0
-    fi
+    [ "$OPT_HACS" != true ] && { msg_warn "HACS пропущен"; mark_done "$sid"; return 0; }
 
     msg_action "Ожидание конфигурации HA (до 5 мин)..."
-    local wait=0
+    local w=0
     while [ ! -f "${HASSIO_DIR}/homeassistant/configuration.yaml" ]; do
-        sleep 5; wait=$((wait+5))
-        if [ $wait -gt 300 ]; then
-            msg_warn "Таймаут. Установите HACS позже:"
-            msg_dim "docker exec homeassistant bash -c 'wget -O - https://get.hacs.xyz | bash -'"
-            mark_done "$sid"; return 0
-        fi
-        [ $((wait % 30)) -eq 0 ] && msg_dim "Ждём ${wait}с..."
-    done
-    msg_ok "configuration.yaml найден"
+        sleep 5; w=$((w+5))
+        [ $w -gt 300 ] && { msg_warn "Таймаут. HACS позже:"; msg_dim "docker exec homeassistant bash -c 'wget -O - https://get.hacs.xyz | bash -'"; mark_done "$sid"; return 0; }
+        [ $((w % 30)) -eq 0 ] && msg_dim "Ждём ${w}с..."
+    done; msg_ok "configuration.yaml найден"
 
     local cw=0
     while ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^homeassistant$'; do
         sleep 5; cw=$((cw+5))
-        [ $cw -gt 120 ] && { msg_warn "Контейнер не найден. HACS пропущен."; mark_done "$sid"; return 0; }
+        [ $cw -gt 120 ] && { msg_warn "Контейнер не найден"; mark_done "$sid"; return 0; }
     done
 
     msg_action "Установка HACS (таймаут 2 мин)..."
-    if timeout 120 docker exec homeassistant \
-        bash -c "wget -q -O - https://get.hacs.xyz | bash -" >/dev/null 2>&1; then
+    if timeout 120 docker exec homeassistant bash -c "wget -q -O - https://get.hacs.xyz | bash -" >/dev/null 2>&1; then
         msg_ok "HACS установлен"
     else
         msg_warn "Таймаут HACS. Установите позже."
@@ -1603,8 +1497,7 @@ step_hacs() {
 # ========================== ФИНАЛ ==========================================
 
 show_final() {
-    local ip
-    ip=$(hostname -I 2>/dev/null | awk '{print $1}') || ip="localhost"
+    local ip; ip=$(hostname -I 2>/dev/null | awk '{print $1}') || ip="localhost"
 
     header "УСТАНОВКА ЗАВЕРШЕНА!"
 
@@ -1615,8 +1508,7 @@ show_final() {
 
     if command -v qrencode &>/dev/null && [ "$SILENT" != true ]; then
         echo -e "  ${BOLD}QR для быстрого доступа:${NC}\n"
-        qrencode -m 2 -t ANSIUTF8 "http://${ip}:8123"
-        echo ""
+        qrencode -m 2 -t ANSIUTF8 "http://${ip}:8123"; echo ""
     fi
 
     separator
@@ -1635,25 +1527,19 @@ show_final() {
     [ "$OPT_HACS" = true ]          && echo -e "  ${CHECK}  HACS"
     [ "$OPT_HOSTNAME" = true ]      && echo -e "  ${CHECK}  Hostname: homeassistant"
     [ "$OPT_STATIC_IP" = true ]     && echo -e "  ${CHECK}  Статический IP: ${STATIC_IP}"
-    [ "$OPT_TELEGRAM" = true ]      && echo -e "  ${CHECK}  Telegram-уведомления"
+    [ "$OPT_TELEGRAM" = true ]      && echo -e "  ${CHECK}  Telegram"
     separator
 
-    echo -e "\n  ${BOLD}Полезные команды:${NC}"
+    echo -e "\n  ${BOLD}Команды:${NC}"
     echo -e "  ${DIM}ha-health${NC}     — сводка состояния"
-    [ "$OPT_BACKUP" = true ] && echo -e "  ${DIM}ha-backup${NC}     — бэкап конфигурации"
-    [ "$OPT_BACKUP" = true ] && echo -e "  ${DIM}ha-restore${NC}    — восстановление"
+    [ "$OPT_BACKUP" = true ] && echo -e "  ${DIM}ha-backup${NC}     — бэкап" && echo -e "  ${DIM}ha-restore${NC}    — восстановление"
 
-    local aa
-    aa=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null) || aa="N"
-    if [ "$aa" != "Y" ]; then
-        echo ""
-        msg_warn "AppArmor требует перезагрузки!"
-        echo -e "  ${YELLOW}Выполните: ${WHITE}sudo reboot${NC}"
-    fi
+    local aa; aa=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null) || aa="N"
+    [ "$aa" != "Y" ] && { echo ""; msg_warn "AppArmor требует перезагрузки!"; echo -e "  ${YELLOW}sudo reboot${NC}"; }
 
     echo ""
-    echo -e "  ${YELLOW}Инициализация HA займёт 10-15 минут.${NC}"
-    echo -e "  ${YELLOW}Подождите, пока интерфейс предложит создать аккаунт.${NC}\n"
+    echo -e "  ${YELLOW}Инициализация HA: 10-15 минут.${NC}"
+    echo -e "  ${YELLOW}Дождитесь экрана создания аккаунта.${NC}\n"
 
     [ "$OPT_TELEGRAM" = true ] && \
         /usr/local/bin/ha-notify "✅ Установка завершена! http://${ip}:8123" 2>/dev/null || true
@@ -1686,7 +1572,7 @@ main() {
     step_preflight || { msg_error "Предварительные проверки не пройдены."; exit 1; }
     step_update_system
     step_install_deps
-    step_configure_network || { msg_error "Сеть не работает. Проверьте и повторите."; exit 1; }
+    step_configure_network || { msg_error "Сеть не работает."; exit 1; }
     step_configure_apparmor
     step_performance
     step_install_docker
