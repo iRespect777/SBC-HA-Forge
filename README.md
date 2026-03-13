@@ -128,7 +128,7 @@
 
 ```bash
 # Скачать и запустить
-wget -O install.sh https://example.com/install.sh
+wget -O install.sh https://raw.githubusercontent.com/iRespect777/HAS-tvbox/refs/heads/main/install.sh
 chmod +x install.sh
 sudo ./install.sh
 ```
