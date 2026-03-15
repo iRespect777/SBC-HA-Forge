@@ -5,12 +5,7 @@
 # Version: 9.1.1
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
-# Repository: https://github.com/mediahome/ha-installer
-#
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/mediahome/ha-installer/main/install.sh -o /tmp/install.sh
-#   sudo bash /tmp/install.sh
-#
+# Repository: https://github.com/iRespect777/HAS-tvbox
 # ============================================================================
 if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Требуется bash >= 4.0"; exit 1
