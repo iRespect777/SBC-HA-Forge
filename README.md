@@ -1771,7 +1771,3 @@ systemctl restart fail2ban
 - armbian-ramlog → не трогаем journald
 - armbian-hardware-optimization → не меняем CPU governor
 - os-release подмена → Debian
-
----
-
-*Документация для HA Installer v8.0. Последнее обновление: июнь 2025.*
