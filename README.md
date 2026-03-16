@@ -1,4 +1,4 @@
-## README.md для GitHub
+## README.md
 
 ```markdown
 # Home Assistant Supervised — Ultimate Installer
