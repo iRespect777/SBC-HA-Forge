@@ -5,7 +5,7 @@
 # Version: 9.2
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
-# Repository: https://github.com/mediahome/ha-installer
+# Repository: https://github.com/iRespect777/HAS-tvbox
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/mediahome/ha-installer/main/install.sh -o /tmp/install.sh
