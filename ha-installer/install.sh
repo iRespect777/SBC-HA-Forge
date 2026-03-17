@@ -2057,7 +2057,7 @@ step_install_deps() {
       for p in "${ti[@]}"; do
         i=$((i+1))
 
-        # Прогресс (переменные инициализированы до арифметики)
+        # Прогресс
         local width=25
         local pct=0 filled=0 empty=0
         pct=$((i * 100 / total))
