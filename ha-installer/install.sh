@@ -2054,21 +2054,25 @@ step_install_deps() {
       # Попытка 2: поштучно
       msg_warn "Пакетная установка не удалась, поштучно..."
       local i=0
+      local width=25
+      local pct=0
+      local filled=0
+      local empty=0
+      local bar=""
+      local j=0
       for p in "${ti[@]}"; do
         i=$((i+1))
 
-        # Прогресс (переменные инициализированы до арифметики)
-        local width=25
-        local pct=0 filled=0 empty=0
+        # Прогресс
         pct=$((i * 100 / total))
         filled=$((i * width / total))
         empty=$((width - filled))
-        local bar="" j
+        bar=""
         for ((j=0; j<filled; j++)); do bar="${bar}#"; done
         for ((j=0; j<empty; j++)); do bar="${bar}."; done
         printf "\r   [%s] %3d%% [%d/%d] %-20s" "$bar" "$pct" "$i" "$total" "$p" > /dev/tty 2>/dev/null || echo "   [${i}/${total}] ${p}"
 
-        # Установка (</dev/null предотвращает SIGTTIN)
+        # Установка
         if DEBIAN_FRONTEND=noninteractive apt-get install -y \
             -o Dpkg::Options::="--force-confold" \
             -o APT::Get::Assume-Yes="true" \
