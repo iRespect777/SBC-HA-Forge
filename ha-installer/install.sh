@@ -283,11 +283,10 @@ apt_wait_lock() {
 
 apt_safe() {
   apt_wait_lock || return 1
-  if command -v timeout &>/dev/null; then
-    timeout 600 apt-get "$@"
-  else
-    apt-get "$@"
-  fi
+  DEBIAN_FRONTEND=noninteractive apt-get \
+    -o Dpkg::Options::="--force-confold" \
+    -o APT::Get::Assume-Yes="true" \
+    "$@" </dev/null
 }
 
 # ============================================================================
@@ -1992,9 +1991,7 @@ step_update_system() {
   setup_wifi
   if [ "$SKIP_UPDATE" = false ]; then
     run_cmd_fatal "apt update" apt_safe update -y
-    run_cmd "apt upgrade" apt_safe upgrade -y -o Dpkg::Options::="--force-confold"
-  else
-    msg_warn "Пропущено (--skip-update)"
+    run_cmd "apt upgrade" apt_safe upgrade -y
   fi
   mark_done "$sid"
 }
@@ -2036,40 +2033,50 @@ step_install_deps() {
   if [ ${#ti[@]} -eq 0 ]; then
     msg_ok "Все пакеты установлены"
   else
-    apt_wait_lock || { msg_error "apt заблокирован"; return 1; }
+    # Ждём lock один раз
+    local lock_wait=0
+    while fuser /var/lib/dpkg/lock-frontend &>/dev/null 2>&1 && [ $lock_wait -lt 60 ]; do
+      [ $lock_wait -eq 0 ] && msg_dim "Ожидание dpkg lock..."
+      sleep 3; lock_wait=$((lock_wait + 3))
+    done
+
     local total=${#ti[@]}
     local f=()
     msg_action "Установка ${total} пакетов..."
 
-    # Попытка 1: все пакеты разом (быстрее)
-    if DEBIAN_FRONTEND=noninteractive apt_safe install -y -o Dpkg::Options::="--force-confold" "${ti[@]}" &>/dev/null; then
+    # Попытка 1: все разом
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        -o Dpkg::Options::="--force-confold" \
+        -o APT::Get::Assume-Yes="true" \
+        "${ti[@]}" </dev/null >/dev/null 2>&1; then
       msg_ok "Установлено: ${total}"
     else
-      # Попытка 2: поштучно с прогрессом
+      # Попытка 2: поштучно
       msg_warn "Пакетная установка не удалась, поштучно..."
       local i=0
       for p in "${ti[@]}"; do
         i=$((i+1))
 
-        # Прогресс-бар в одну строку с именем пакета
-        local width=25
-        local pct=$((i * 100 / total))
-        local filled=$((i * width / total))
-        local empty=$((width - filled))
-        local bar=""
-        local j
+        # Прогресс
+        local width=25 pct=$((i * 100 / total))
+        local filled=$((i * width / total)) empty=$((width - filled))
+        local bar="" j
         for ((j=0; j<filled; j++)); do bar="${bar}#"; done
         for ((j=0; j<empty; j++)); do bar="${bar}."; done
-        printf "\r   [%s] %3d%% [%d/%d] %s " "$bar" "$pct" "$i" "$total" "$p" > /dev/tty 2>/dev/null || true
+        printf "\r   [%s] %3d%% [%d/%d] %-20s" "$bar" "$pct" "$i" "$total" "$p" > /dev/tty 2>/dev/null || echo "   [${i}/${total}] ${p}"
 
-        if DEBIAN_FRONTEND=noninteractive apt_safe install -y -o Dpkg::Options::="--force-confold" "$p" &>/dev/null; then
-          true  # успех, прогресс-бар обновится на следующей итерации
+        # Ключевое: </dev/null отвязывает от терминала
+        if DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            -o Dpkg::Options::="--force-confold" \
+            -o APT::Get::Assume-Yes="true" \
+            "$p" </dev/null >/dev/null 2>&1; then
+          true
         else
           f+=("$p")
         fi
       done
 
-      # Очистить строку прогресса и показать результат
+      # Очистка строки
       printf "\r%80s\r" "" > /dev/tty 2>/dev/null || true
       if [ ${#f[@]} -gt 0 ]; then
         msg_ok "Установлено: $((total - ${#f[@]})) из ${total}"
