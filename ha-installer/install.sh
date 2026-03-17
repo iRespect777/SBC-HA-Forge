@@ -2030,7 +2030,7 @@ step_install_deps() {
   local ti=()
   for p in "${pkgs[@]}"; do is_pkg_installed "$p" || ti+=("$p"); done
 
-  if [ ${#ti[@]} -eq 0 ]; then
+    if [ ${#ti[@]} -eq 0 ]; then
     msg_ok "Все пакеты установлены"
   else
     # Ждём lock один раз
@@ -2057,15 +2057,18 @@ step_install_deps() {
       for p in "${ti[@]}"; do
         i=$((i+1))
 
-        # Прогресс
-        local width=25 pct=$((i * 100 / total))
-        local filled=$((i * width / total)) empty=$((width - filled))
+        # Прогресс (переменные инициализированы до арифметики)
+        local width=25
+        local pct=0 filled=0 empty=0
+        pct=$((i * 100 / total))
+        filled=$((i * width / total))
+        empty=$((width - filled))
         local bar="" j
         for ((j=0; j<filled; j++)); do bar="${bar}#"; done
         for ((j=0; j<empty; j++)); do bar="${bar}."; done
         printf "\r   [%s] %3d%% [%d/%d] %-20s" "$bar" "$pct" "$i" "$total" "$p" > /dev/tty 2>/dev/null || echo "   [${i}/${total}] ${p}"
 
-        # Ключевое: </dev/null отвязывает от терминала
+        # Установка (</dev/null предотвращает SIGTTIN)
         if DEBIAN_FRONTEND=noninteractive apt-get install -y \
             -o Dpkg::Options::="--force-confold" \
             -o APT::Get::Assume-Yes="true" \
