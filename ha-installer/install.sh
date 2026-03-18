@@ -1374,24 +1374,46 @@ setup_docker_mirror() {
 do_benchmark() {
   header "ТЕСТ ПРОИЗВОДИТЕЛЬНОСТИ"
   detect_system_info
-  local ram_mb cpu_cores
-  ram_mb=$(free -m | awk '/Mem:/{print $2}')
-  cpu_cores=$(nproc 2>/dev/null || echo 1)
-  echo -e "   ${BOLD}CPU:${NC}  $(lscpu 2>/dev/null | awk -F: '/Model name/{print $2}' | xargs) (${cpu_cores} ядер)"
-  echo -e "   ${BOLD}RAM:${NC}  ${ram_mb}МБ"
+  BENCH_RAM_MB=$(free -m | awk '/Mem:/{print $2}')
+  BENCH_CPU_CORES=$(nproc 2>/dev/null || echo 1)
+  echo -e "   ${BOLD}CPU:${NC}  $(lscpu 2>/dev/null | awk -F: '/Model name/{print $2}' | xargs) (${BENCH_CPU_CORES} ядер)"
+  echo -e "   ${BOLD}RAM:${NC}  ${BENCH_RAM_MB}МБ"
   echo -e "   ${BOLD}Арх:${NC}  ${CACHED_MACHINE_ARCH}"
   echo -e "   ${BOLD}ОС:${NC}   ${CACHED_PRETTY_NAME}"
   separator
   msg_action "Тест диска (50МБ)..."
-  local dio
-  dio=$(dd if=/dev/zero of=/tmp/.ha_bench bs=1M count=50 oflag=dsync 2>&1 | tail -1 | awk -F, '{print $NF}' | xargs)
+  BENCH_DISK_SPEED=$(dd if=/dev/zero of=/tmp/.ha_bench bs=1M count=50 oflag=dsync 2>&1 | tail -1 | awk -F, '{print $NF}' | xargs)
   rm -f /tmp/.ha_bench
-  echo -e "   ${BOLD}Диск:${NC} ${dio}"
+  echo -e "   ${BOLD}Диск:${NC} ${BENCH_DISK_SPEED}"
   separator
-  local verdict="Подходит для Home Assistant"
-  [ "$ram_mb" -lt 900 ] && verdict="НЕ подходит (нужно 1ГБ+ RAM)"
-  [ "$ram_mb" -lt 2048 ] && [ "$verdict" = "Подходит для Home Assistant" ] && verdict="Подходит (мало RAM)"
-  echo -e "\n   ${BOLD}Вердикт:${NC} ${verdict}\n"
+
+  # Verdict and recommendations
+  BENCH_VERDICT="standard"
+  if [ "$BENCH_RAM_MB" -lt 900 ]; then
+    BENCH_VERDICT="impossible"
+    echo -e "   ${BOLD}Вердикт:${NC} ${RED}НЕ подходит (нужно 1ГБ+ RAM)${NC}"
+  elif [ "$BENCH_RAM_MB" -lt 1500 ]; then
+    BENCH_VERDICT="minimal"
+    echo -e "   ${BOLD}Вердикт:${NC} ${YELLOW}Подходит (мало RAM — рекомендуется minimal)${NC}"
+  elif [ "$BENCH_RAM_MB" -lt 3000 ]; then
+    BENCH_VERDICT="standard"
+    echo -e "   ${BOLD}Вердикт:${NC} ${GREEN}Подходит (рекомендуется standard)${NC}"
+  else
+    BENCH_VERDICT="full"
+    echo -e "   ${BOLD}Вердикт:${NC} ${GREEN}Отлично (можно full с мониторингом)${NC}"
+  fi
+
+  echo ""
+  echo -e "   ${BOLD}Рекомендации:${NC}"
+  echo -e "   Профиль: ${CYAN}${BENCH_VERDICT}${NC}"
+  if [ "$BENCH_RAM_MB" -lt 1500 ]; then
+    echo -e "   Swap:    ${CYAN}2048 МБ (файл на диске)${NC}"
+  elif [ "$BENCH_RAM_MB" -lt 4000 ]; then
+    echo -e "   Swap:    ${CYAN}zram (в RAM)${NC}"
+  else
+    echo -e "   Swap:    ${CYAN}none (достаточно RAM)${NC}"
+  fi
+  echo ""
 }
 
 generate_info_file() {
@@ -1601,9 +1623,10 @@ run_wizard() {
   # =============================================
   if [ "$wizard_mode" = "quick" ]; then
     # Quick: only presets, no custom
-    local prof=""
+    local prof_title="Профиль"
+    [ -n "$BENCH_VERDICT" ] && [ "$BENCH_VERDICT" != "" ] && prof_title="Профиль (рекомендуется: ${BENCH_VERDICT})"
     if [ "$HAS_WHIPTAIL" = true ]; then
-      prof=$(_whip_menu "Профиль" \
+      prof=$(_whip_menu "$prof_title" \
         "minimal"  "Только HA + Docker (без доп. компонентов)" \
         "standard" "Рекомендуемый (файрвол, бэкапы, watchdog)" \
         "full"     "Полный (+ мониторинг Prometheus)" \
@@ -1611,16 +1634,17 @@ run_wizard() {
         "dev"      "Разработчик (HA + HACS, без оптимизаций)")
       [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
     else
-      prof=$(text_menu "Профиль" "Выберите:" \
+      prof=$(text_menu "$prof_title" "Выберите:" \
         "minimal" "Только HA" "standard" "Рекомендуемый" "full" "Полный" \
         "server" "Сервер" "dev" "Разработчик") || { _wizard_cancelled && return 1 || exit 0; }
     fi
     apply_profile "$prof"
   else
     # Advanced: presets + custom
-    local prof=""
+    local prof_title="Профиль"
+    [ -n "$BENCH_VERDICT" ] && [ "$BENCH_VERDICT" != "" ] && prof_title="Профиль (рекомендуется: ${BENCH_VERDICT})"
     if [ "$HAS_WHIPTAIL" = true ]; then
-      prof=$(_whip_menu "Профиль" \
+      prof=$(_whip_menu "$prof_title" \
         "minimal"  "Только HA + Docker" \
         "standard" "Рекомендуемый (файрвол, бэкапы, watchdog)" \
         "full"     "Полный (+ мониторинг)" \
@@ -1629,7 +1653,7 @@ run_wizard() {
         "custom"   "Выбрать компоненты вручную")
       [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
     else
-      prof=$(text_menu "Профиль" "Выберите:" \
+      prof=$(text_menu "$prof_title" "Выберите:" \
         "minimal" "Только HA" "standard" "Рекомендуемый" "full" "Полный" \
         "server" "Сервер" "dev" "Разработчик" "custom" "Вручную") || { _wizard_cancelled && return 1 || exit 0; }
     fi
@@ -1703,11 +1727,13 @@ run_wizard() {
   fi
 
   # Swap
+  local eff_ram="${BENCH_RAM_MB:-$ram_mb}"
   local swap_rec="zram"
-  [ "$ram_mb" -lt 1500 ] && swap_rec="2048"
-  [ "$ram_mb" -gt 4000 ] && swap_rec="none"
-  if [ "$HAS_WHIPTAIL" = true ]; then
-    OPT_SWAP_SIZE=$(_whip_menu "Swap (RAM: ${ram_mb}МБ)" \
+  [ "$eff_ram" -lt 1500 ] && swap_rec="2048"
+  [ "$eff_ram" -gt 4000 ] && swap_rec="none"
+  local swap_title="Swap (RAM: ${eff_ram}МБ, рекомендуется: ${swap_rec})"
+    if [ "$HAS_WHIPTAIL" = true ]; then
+    OPT_SWAP_SIZE=$(_whip_menu "$swap_title" \
       "zram" "ZRAM в RAM (рекомендуется 2-4ГБ)" \
       "1024" "Файл 1ГБ на диске" \
       "2048" "Файл 2ГБ (для устройств с 1ГБ RAM)" \
@@ -1715,7 +1741,7 @@ run_wizard() {
       "none" "Без swap (если RAM 4ГБ+)")
     [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
   else
-    OPT_SWAP_SIZE=$(text_menu "Swap (${ram_mb}МБ, рек: ${swap_rec})" "Выберите:" \
+    OPT_SWAP_SIZE=$(text_menu "$swap_title" "Выберите:" \
       "zram" "ZRAM" "1024" "1ГБ" "2048" "2ГБ" "none" "Без swap") || OPT_SWAP_SIZE="$swap_rec"
   fi
 
