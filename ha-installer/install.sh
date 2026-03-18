@@ -1458,11 +1458,11 @@ apply_profile() {
 # Ask: restart wizard or exit? Returns 0=restart, 1=exit
 _wizard_cancelled() {
   if command -v whiptail &>/dev/null; then
-    whiptail --title "Отменено" --yesno "Начать настройку сначала?\n\nДа = вернуться к началу\nНет = выйти" 10 50
+    whiptail --title "Отменено" --yesno "Вернуться в главное меню?\n\nДа = главное меню\nНет = выйти из скрипта" 10 50
     return $?
   else
     echo "" >&2
-    echo -en "   Начать сначала? (д/н): " >&2
+    echo -en "   Вернуться в меню? (д/н): " >&2
     local ans; read -r ans
     [ "$ans" = "y" ] || [ "$ans" = "Y" ] || [ "$ans" = "д" ] || [ "$ans" = "Д" ] && return 0
     return 1
@@ -1606,11 +1606,11 @@ run_wizard() {
         prof=$(_whip_menu "Шаг 2: Профиль" \
           "minimal" "Только HA + Docker" "standard" "Рекомендуемый" \
           "full" "Полный + мониторинг" "server" "Сервер + стат. IP" "dev" "Разработчик")
-        [ $? -ne 0 ] && { _wizard_cancelled && continue || exit 0; }
+        [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
       else
         prof=$(text_menu "Шаг 2: Профиль" "Выберите:" \
           "minimal" "Только HA" "standard" "Рекомендуемый" "full" "Полный" \
-          "server" "Сервер" "dev" "Разработчик") || { _wizard_cancelled && continue || exit 0; }
+          "server" "Сервер" "dev" "Разработчик") || { _wizard_cancelled && return 1 || exit 0; }
       fi
       apply_profile "$prof"
 
@@ -1621,27 +1621,27 @@ run_wizard() {
           "minimal" "Только HA + Docker" "standard" "Рекомендуемый" \
           "full" "Полный + мониторинг" "server" "Сервер + стат. IP" \
           "dev" "Разработчик" "custom" "Выбрать вручную")
-        [ $? -ne 0 ] && { _wizard_cancelled && continue || exit 0; }
+        [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
       else
         prof=$(text_menu "Шаг 2: Профиль" "Выберите:" \
           "minimal" "Только HA" "standard" "Рекомендуемый" "full" "Полный" \
-          "server" "Сервер" "dev" "Разработчик" "custom" "Вручную") || { _wizard_cancelled && continue || exit 0; }
+          "server" "Сервер" "dev" "Разработчик" "custom" "Вручную") || { _wizard_cancelled && return 1 || exit 0; }
       fi
       if [ "$prof" = "custom" ]; then
-        _wizard_select_components || { _wizard_cancelled && continue || exit 0; }
+        _wizard_select_components || { _wizard_cancelled && return 1 || exit 0; }
       else
         apply_profile "$prof"
       fi
 
     else # expert
-      _wizard_select_components || { _wizard_cancelled && continue || exit 0; }
+      _wizard_select_components || { _wizard_cancelled && return 1 || exit 0; }
     fi
 
     # --- Step 4: Timezone ---
     local curtz; curtz=$(timedatectl 2>/dev/null | awk '/Time zone/{print $3}') || curtz="UTC"
     if [ "$HAS_WHIPTAIL" = true ]; then
       OPT_TIMEZONE=$(_whip_input "Шаг 3: Часовой пояс" "Например: Europe/Moscow\nТекущий: ${curtz}" "$curtz")
-      [ $? -ne 0 ] && { _wizard_cancelled && continue || exit 0; }
+      [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
     else
       OPT_TIMEZONE=$(text_input "Часовой пояс (${curtz})" "$curtz")
     fi
@@ -1683,7 +1683,7 @@ run_wizard() {
       OPT_SWAP_SIZE=$(_whip_menu "Шаг 4: Swap (RAM: ${ram_mb}МБ)" \
         "zram" "ZRAM (2-4ГБ)" "1024" "1ГБ файл" "2048" "2ГБ файл" \
         "4096" "4ГБ файл" "none" "Без swap")
-      [ $? -ne 0 ] && { _wizard_cancelled && continue || exit 0; }
+      [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
     else
       OPT_SWAP_SIZE=$(text_menu "Swap (${ram_mb}МБ, рек: ${swap_rec})" "Выберите:" \
         "zram" "ZRAM" "1024" "1ГБ" "2048" "2ГБ" "none" "Без swap") || OPT_SWAP_SIZE="$swap_rec"
