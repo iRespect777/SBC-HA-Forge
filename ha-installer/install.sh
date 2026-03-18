@@ -1556,344 +1556,354 @@ run_wizard() {
   local ram_mb; ram_mb=$(free -m | awk '/Mem:/{print $2}')
   local disk_mb; disk_mb=$(df -m / | awk 'NR==2{print $4}')
 
-  # Outer loop: allows restarting wizard from beginning
-    # Reset all wizard options for clean restart
-    PROFILE=""
-    OPT_TIMEZONE=""; OPT_LOCALE=""; OPT_SWAP_SIZE=""; OPT_DATA_DIR=""
-    OPT_WIFI_SSID=""; OPT_WIFI_PASS=""; OPT_DOCKER_MIRROR=""
-    OPT_WEBHOOK_URL=""; OPT_RESTORE_BACKUP=""
-    OPT_AUTO_REBOOT=false
-    TG_TOKEN=""; TG_CHAT=""
-    STATIC_IP=""; STATIC_GW=""; STATIC_DNS=""
-    PROXY_DOMAIN=""; REMOTE_BACKUP_TARGET=""
-    local wizard_mode=""
+  # Welcome
+  if [ "$HAS_WHIPTAIL" = true ]; then
+    whiptail --title "HA Установщик v${SCRIPT_VERSION}" --msgbox \
+      "Установщик Home Assistant Supervised\n\n${si}\nRAM: ${ram_mb}МБ | Диск: ${disk_mb}МБ\n\nESC на любом шаге = вернуться в меню" 14 64
+  else
+    header "HA Установщик v${SCRIPT_VERSION}"
+    msg_info "${si}"; msg_info "RAM: ${ram_mb}МБ | Диск: ${disk_mb}МБ"
+    echo ""
+  fi
 
-    # --- Welcome ---
+  # Reset all options
+  PROFILE=""
+  OPT_TIMEZONE=""; OPT_LOCALE=""; OPT_SWAP_SIZE=""; OPT_DATA_DIR=""
+  OPT_WIFI_SSID=""; OPT_WIFI_PASS=""; OPT_DOCKER_MIRROR=""
+  OPT_WEBHOOK_URL=""; OPT_RESTORE_BACKUP=""
+  OPT_AUTO_REBOOT=false
+  TG_TOKEN=""; TG_CHAT=""
+  STATIC_IP=""; STATIC_GW=""; STATIC_DNS=""
+  PROXY_DOMAIN=""; REMOTE_BACKUP_TARGET=""
+  local wizard_mode=""
+
+  # --- Step 1: Mode ---
+  if [ "$HAS_WHIPTAIL" = true ]; then
+    wizard_mode=$(_whip_menu "Режим установки" \
+      "quick"    "Быстрый (профиль + часовой пояс)" \
+      "advanced" "Расширенный (все настройки)" \
+      "expert"   "Эксперт (компоненты + всё)")
+    [ $? -ne 0 ] && return 1
+  else
+    wizard_mode=$(text_menu "Режим установки" "Выберите:" \
+      "quick" "Быстрый" "advanced" "Расширенный" "expert" "Эксперт") || return 1
+  fi
+
+  # --- Step 2: Benchmark (not in quick) ---
+  if [ "$wizard_mode" != "quick" ] && [ "$HAS_WHIPTAIL" = true ]; then
+    if whiptail --title "Тест железа" --yesno "Запустить тест? (~30с)" 8 50 --defaultno 2>/dev/null; then
+      do_benchmark
+      [ -t 0 ] && { echo -en "\n   Нажмите Enter..." >&2; read -r; }
+    fi
+  fi
+
+  # --- Step 3: Profile / Components ---
+  if [ "$wizard_mode" = "quick" ]; then
+    local prof=""
     if [ "$HAS_WHIPTAIL" = true ]; then
-      whiptail --title "HA Установщик v${SCRIPT_VERSION}" --msgbox \
-        "Установщик Home Assistant Supervised\n\n${si}\nRAM: ${ram_mb}МБ | Диск: ${disk_mb}МБ\n\nESC на любом шаге = начать сначала" 14 64
+      prof=$(_whip_menu "Профиль" \
+        "minimal" "Только HA + Docker" "standard" "Рекомендуемый" \
+        "full" "Полный + мониторинг" "server" "Сервер + стат. IP" "dev" "Разработчик")
+      [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
     else
-      header "HA Установщик v${SCRIPT_VERSION}"
-      msg_info "${si}"; msg_info "RAM: ${ram_mb}МБ | Диск: ${disk_mb}МБ"
-      echo ""
+      prof=$(text_menu "Профиль" "Выберите:" \
+        "minimal" "Только HA" "standard" "Рекомендуемый" "full" "Полный" \
+        "server" "Сервер" "dev" "Разработчик") || { _wizard_cancelled && return 1 || exit 0; }
     fi
+    apply_profile "$prof"
 
-    # --- Step 1: Mode ---
+  elif [ "$wizard_mode" = "advanced" ]; then
+    local prof=""
     if [ "$HAS_WHIPTAIL" = true ]; then
-      wizard_mode=$(_whip_menu "Режим установки" \
-        "quick"    "Быстрый (профиль + часовой пояс)" \
-        "advanced" "Расширенный (все настройки)" \
-        "expert"   "Эксперт (компоненты + всё)")
-      [ $? -ne 0 ] && return 1
+      prof=$(_whip_menu "Профиль" \
+        "minimal" "Только HA + Docker" "standard" "Рекомендуемый" \
+        "full" "Полный + мониторинг" "server" "Сервер + стат. IP" \
+        "dev" "Разработчик" "custom" "Выбрать вручную")
+      [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
     else
-      wizard_mode=$(text_menu "Режим установки" "Выберите:" \
-        "quick" "Быстрый" "advanced" "Расширенный" "expert" "Эксперт") || return 1
+      prof=$(text_menu "Профиль" "Выберите:" \
+        "minimal" "Только HA" "standard" "Рекомендуемый" "full" "Полный" \
+        "server" "Сервер" "dev" "Разработчик" "custom" "Вручную") || { _wizard_cancelled && return 1 || exit 0; }
     fi
-
-    # --- Step 2: Benchmark (not in quick) ---
-    if [ "$wizard_mode" != "quick" ] && [ "$HAS_WHIPTAIL" = true ]; then
-      if whiptail --title "Тест железа" --yesno "Запустить тест? (~30с)" 8 50 --defaultno 2>/dev/null; then
-        do_benchmark
-        [ -t 0 ] && { echo -en "\n   Нажмите Enter..." >&2; read -r; }
-      fi
-    fi
-
-    # --- Step 3: Profile / Components ---
-    if [ "$wizard_mode" = "quick" ]; then
-      local prof=""
-      if [ "$HAS_WHIPTAIL" = true ]; then
-        prof=$(_whip_menu "Шаг 2: Профиль" \
-          "minimal" "Только HA + Docker" "standard" "Рекомендуемый" \
-          "full" "Полный + мониторинг" "server" "Сервер + стат. IP" "dev" "Разработчик")
-        [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
-      else
-        prof=$(text_menu "Шаг 2: Профиль" "Выберите:" \
-          "minimal" "Только HA" "standard" "Рекомендуемый" "full" "Полный" \
-          "server" "Сервер" "dev" "Разработчик") || { _wizard_cancelled && return 1 || exit 0; }
-      fi
-      apply_profile "$prof"
-
-    elif [ "$wizard_mode" = "advanced" ]; then
-      local prof=""
-      if [ "$HAS_WHIPTAIL" = true ]; then
-        prof=$(_whip_menu "Шаг 2: Профиль" \
-          "minimal" "Только HA + Docker" "standard" "Рекомендуемый" \
-          "full" "Полный + мониторинг" "server" "Сервер + стат. IP" \
-          "dev" "Разработчик" "custom" "Выбрать вручную")
-        [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
-      else
-        prof=$(text_menu "Шаг 2: Профиль" "Выберите:" \
-          "minimal" "Только HA" "standard" "Рекомендуемый" "full" "Полный" \
-          "server" "Сервер" "dev" "Разработчик" "custom" "Вручную") || { _wizard_cancelled && return 1 || exit 0; }
-      fi
-      if [ "$prof" = "custom" ]; then
-        _wizard_select_components || { _wizard_cancelled && return 1 || exit 0; }
-      else
-        apply_profile "$prof"
-      fi
-
-    else # expert
+    if [ "$prof" = "custom" ]; then
       _wizard_select_components || { _wizard_cancelled && return 1 || exit 0; }
-    fi
-
-    # --- Step 4: Timezone ---
-    local curtz; curtz=$(timedatectl 2>/dev/null | awk '/Time zone/{print $3}') || curtz="UTC"
-    if [ "$HAS_WHIPTAIL" = true ]; then
-      OPT_TIMEZONE=$(_whip_input "Шаг 3: Часовой пояс" "Например: Europe/Moscow\nТекущий: ${curtz}" "$curtz")
-      [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
     else
-      OPT_TIMEZONE=$(text_input "Часовой пояс (${curtz})" "$curtz")
-    fi
-    OPT_TIMEZONE="${OPT_TIMEZONE:-$curtz}"
-
-    # Quick mode: skip to confirmation
-    if [ "$wizard_mode" = "quick" ]; then
-      # Confirm
-      local qs="Быстрая установка:\n\n  Профиль: ${PROFILE}\n  Часовой пояс: ${OPT_TIMEZONE}\n\nНачать?"
-      if [ "$HAS_WHIPTAIL" = true ]; then
-        whiptail --title "Подтверждение" --yesno "$qs" 12 50 && return 0
-        _wizard_cancelled && return 1 || exit 0
-      else
-        echo -e "\n$qs" >&2
-        text_yesno "Начать?" "y" && return 0
-        _wizard_cancelled && return 1 || exit 0
-      fi
+      apply_profile "$prof"
     fi
 
-    # --- Advanced/Expert options ---
+  else # expert
+    _wizard_select_components || { _wizard_cancelled && return 1 || exit 0; }
+  fi
 
-    # Locale (expert only)
-    if [ "$wizard_mode" = "expert" ]; then
-      local curloc; curloc=$(locale 2>/dev/null | awk -F= '/^LANG=/{print $2}') || curloc="C.UTF-8"
-      if [ "$HAS_WHIPTAIL" = true ]; then
-        if whiptail --title "Локаль" --yesno "Сменить локаль?\nТекущая: ${curloc}" 10 50 --defaultno 2>/dev/null; then
-          OPT_LOCALE=$(_whip_input "Локаль" "Например: ru_RU.UTF-8" "$curloc") || OPT_LOCALE=""
-        fi
-      else
-        text_yesno "Сменить локаль? (${curloc})" "n" && OPT_LOCALE=$(text_input "Локаль" "$curloc")
-      fi
-    fi
+  # --- Step 4: Timezone ---
+  local curtz; curtz=$(timedatectl 2>/dev/null | awk '/Time zone/{print $3}') || curtz="UTC"
+  if [ "$HAS_WHIPTAIL" = true ]; then
+    OPT_TIMEZONE=$(_whip_input "Часовой пояс" "Например: Europe/Moscow\nТекущий: ${curtz}" "$curtz")
+    [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
+  else
+    OPT_TIMEZONE=$(text_input "Часовой пояс (${curtz})" "$curtz")
+  fi
+  OPT_TIMEZONE="${OPT_TIMEZONE:-$curtz}"
 
-    # Swap
-    local swap_rec="zram"
-    [ "$ram_mb" -lt 1500 ] && swap_rec="2048"
-    [ "$ram_mb" -gt 4000 ] && swap_rec="none"
+  # --- Quick mode: confirmation and exit ---
+  if [ "$wizard_mode" = "quick" ]; then
+    local qs="Быстрая установка:\n\n  Профиль: ${PROFILE}\n  Часовой пояс: ${OPT_TIMEZONE}\n\nНачать?"
     if [ "$HAS_WHIPTAIL" = true ]; then
-      OPT_SWAP_SIZE=$(_whip_menu "Шаг 4: Swap (RAM: ${ram_mb}МБ)" \
-        "zram" "ZRAM (2-4ГБ)" "1024" "1ГБ файл" "2048" "2ГБ файл" \
-        "4096" "4ГБ файл" "none" "Без swap")
-      [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
-    else
-      OPT_SWAP_SIZE=$(text_menu "Swap (${ram_mb}МБ, рек: ${swap_rec})" "Выберите:" \
-        "zram" "ZRAM" "1024" "1ГБ" "2048" "2ГБ" "none" "Без swap") || OPT_SWAP_SIZE="$swap_rec"
-    fi
-
-    # Data dir
-    local dw=""; [ "$disk_mb" -lt 20000 ] && dw=" (${disk_mb}МБ!)"
-    if [ "$HAS_WHIPTAIL" = true ]; then
-      if whiptail --title "Шаг 5: Внешний диск" --yesno "Использовать?${dw}" 10 55 --defaultno 2>/dev/null; then
-        local mi; mi=$(lsblk -o NAME,SIZE,MOUNTPOINT,FSTYPE 2>/dev/null | grep -E "sd|nvme" | head -10)
-        OPT_DATA_DIR=$(_whip_input "Путь к данным" "${mi}" "/mnt/data") || OPT_DATA_DIR=""
-      fi
-    else
-      if text_yesno "Внешний диск?${dw}" "n"; then
-        OPT_DATA_DIR=$(text_input "Путь к данным" "/mnt/data")
-      fi
-    fi
-
-    # WiFi
-    local has_wifi=false
-    { iw dev 2>/dev/null | grep -q Interface || ip link 2>/dev/null | grep -q wlan; } && has_wifi=true
-    if [ "$has_wifi" = true ]; then
-      local do_wifi=false
-      if [ "$HAS_WHIPTAIL" = true ]; then
-        whiptail --title "Шаг 6: WiFi" --yesno "Адаптер найден. Настроить?" 8 50 --defaultno 2>/dev/null && do_wifi=true
-      else
-        text_yesno "WiFi найден. Настроить?" "n" && do_wifi=true
-      fi
-      if [ "$do_wifi" = true ]; then
-        local wl; wl=$(nmcli -t -f SSID dev wifi list 2>/dev/null | sort -u | head -10 | tr '\n' ', ') || wl=""
-        if [ "$HAS_WHIPTAIL" = true ]; then
-          OPT_WIFI_SSID=$(_whip_input "WiFi SSID" "Рядом: ${wl}" "") || OPT_WIFI_SSID=""
-          [ -n "$OPT_WIFI_SSID" ] && {
-            OPT_WIFI_PASS=$(whiptail --title "Пароль WiFi" --passwordbox "Пароль:" 10 50 3>&1 1>&2 2>&3) || OPT_WIFI_SSID=""
-          }
-        else
-          [ -n "$wl" ] && echo -e "   Рядом: ${wl}" >&2
-          OPT_WIFI_SSID=$(text_input "SSID" "")
-          [ -n "$OPT_WIFI_SSID" ] && OPT_WIFI_PASS=$(text_password "Пароль WiFi")
-        fi
-      fi
-    fi
-
-    # Docker mirror (expert only)
-    if [ "$wizard_mode" = "expert" ]; then
-      if [ "$HAS_WHIPTAIL" = true ]; then
-        if whiptail --title "Зеркало Docker" --yesno "Если заблокирован" 8 50 --defaultno 2>/dev/null; then
-          OPT_DOCKER_MIRROR=$(_whip_input "URL зеркала" "" "") || OPT_DOCKER_MIRROR=""
-        fi
-      else
-        text_yesno "Зеркало Docker?" "n" && OPT_DOCKER_MIRROR=$(text_input "URL" "")
-      fi
-    fi
-
-    # Notifications
-    if [ "$OPT_TELEGRAM" = true ]; then
-      # Telegram selected in components — ask for token
-      if [ "$HAS_WHIPTAIL" = true ]; then
-        TG_TOKEN=$(_whip_input "Telegram" "Токен бота" "") || TG_TOKEN=""
-        [ -n "$TG_TOKEN" ] && { TG_CHAT=$(_whip_input "Telegram" "Chat ID" "") || TG_CHAT=""; }
-      else
-        TG_TOKEN=$(text_input "Токен бота" "")
-        [ -n "$TG_TOKEN" ] && TG_CHAT=$(text_input "Chat ID" "")
-      fi
-      { [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; } && OPT_TELEGRAM=false
-    fi
-
-    if [ "$OPT_TELEGRAM" != true ] && [ -z "$OPT_WEBHOOK_URL" ]; then
-      local notif="none"
-      if [ "$HAS_WHIPTAIL" = true ]; then
-        notif=$(_whip_menu "Шаг 7: Уведомления" \
-          "none" "Без уведомлений" "telegram" "Telegram" \
-          "ntfy" "ntfy.sh (бесплатно)" "discord" "Discord" "custom" "Свой webhook")
-        [ $? -ne 0 ] && notif="none"
-      else
-        notif=$(text_menu "Уведомления" "Способ:" \
-          "none" "Нет" "telegram" "Telegram" "ntfy" "ntfy.sh" \
-          "discord" "Discord" "custom" "URL") || notif="none"
-      fi
-      case "$notif" in
-        telegram)
-          OPT_TELEGRAM=true
-          if [ "$HAS_WHIPTAIL" = true ]; then
-            TG_TOKEN=$(_whip_input "Telegram" "Токен бота" "") || TG_TOKEN=""
-            [ -n "$TG_TOKEN" ] && { TG_CHAT=$(_whip_input "Telegram" "Chat ID" "") || TG_CHAT=""; }
-          else
-            TG_TOKEN=$(text_input "Токен бота" ""); [ -n "$TG_TOKEN" ] && TG_CHAT=$(text_input "Chat ID" "")
-          fi
-          { [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; } && OPT_TELEGRAM=false
-          ;;
-        ntfy)
-          local topic=""
-          if [ "$HAS_WHIPTAIL" = true ]; then
-            topic=$(_whip_input "ntfy.sh" "Название темы" "ha-$(hostname 2>/dev/null || echo box)") || topic=""
-          else
-            topic=$(text_input "Тема ntfy.sh" "ha-$(hostname 2>/dev/null || echo box)")
-          fi
-          [ -n "$topic" ] && OPT_WEBHOOK_URL="https://ntfy.sh/${topic}"
-          ;;
-        discord|custom)
-          if [ "$HAS_WHIPTAIL" = true ]; then
-            OPT_WEBHOOK_URL=$(_whip_input "Webhook" "URL" "") || OPT_WEBHOOK_URL=""
-          else
-            OPT_WEBHOOK_URL=$(text_input "Webhook URL" "")
-          fi
-          ;;
-      esac
-    fi
-
-    # Restore backup
-    local do_restore=false
-    if [ "$HAS_WHIPTAIL" = true ]; then
-      whiptail --title "Шаг 8: Бэкап" --yesno "Восстановить после установки?" 8 50 --defaultno 2>/dev/null && do_restore=true
-    else
-      text_yesno "Восстановить бэкап?" "n" && do_restore=true
-    fi
-    if [ "$do_restore" = true ]; then
-      local found=""
-      for d in /mnt /media /tmp /var/backups; do
-        local fb; fb=$(find "$d" -maxdepth 3 -name "ha_config_*.tar.gz" -type f 2>/dev/null | head -3)
-        [ -n "$fb" ] && found="${found}${fb}"$'\n'
-      done
-      if [ "$HAS_WHIPTAIL" = true ]; then
-        local hint=""; [ -n "$found" ] && hint="\nНайдены:\n${found}"
-        OPT_RESTORE_BACKUP=$(_whip_input "Файл бэкапа" "Путь:${hint}" "") || OPT_RESTORE_BACKUP=""
-      else
-        [ -n "$found" ] && { echo -e "   Бэкапы:" >&2; echo "$found" | while IFS= read -r l; do [ -n "$l" ] && echo "   $l" >&2; done; }
-        OPT_RESTORE_BACKUP=$(text_input "Путь к .tar.gz" "")
-      fi
-      [ -n "$OPT_RESTORE_BACKUP" ] && [ ! -f "$OPT_RESTORE_BACKUP" ] && { msg_warn "Не найден"; OPT_RESTORE_BACKUP=""; }
-    fi
-
-    # Static IP (if selected in components)
-    if [ "$OPT_STATIC_IP" = true ]; then
-      local cip; cip=$(hostname -I 2>/dev/null | awk '{print $1}') || cip=""
-      local cgw; cgw=$(ip route 2>/dev/null | awk '/default/{print $3}' | head -1) || cgw=""
-      while true; do
-        if [ "$HAS_WHIPTAIL" = true ]; then
-          STATIC_IP=$(_whip_input "Стат. IP" "IP-адрес" "$cip") || { OPT_STATIC_IP=false; break; }
-        else
-          STATIC_IP=$(text_input "Статический IP" "$cip"); [ -z "$STATIC_IP" ] && { OPT_STATIC_IP=false; break; }
-        fi
-        validate_ip "$STATIC_IP" && break; msg_warn "Неверный IP"
-      done
-      if [ "$OPT_STATIC_IP" = true ]; then
-        while true; do
-          if [ "$HAS_WHIPTAIL" = true ]; then
-            STATIC_GW=$(_whip_input "Шлюз" "" "$cgw") || { STATIC_GW="$cgw"; break; }
-          else STATIC_GW=$(text_input "Шлюз" "$cgw"); fi
-          validate_gw "$STATIC_GW" && break; msg_warn "Неверный шлюз"
-        done
-        while true; do
-          if [ "$HAS_WHIPTAIL" = true ]; then
-            STATIC_DNS=$(_whip_input "DNS" "Через запятую" "8.8.8.8,1.1.1.1") || { STATIC_DNS="8.8.8.8,1.1.1.1"; break; }
-          else STATIC_DNS=$(text_input "DNS" "8.8.8.8,1.1.1.1"); fi
-          validate_dns_list "$STATIC_DNS" && break; msg_warn "Неверный DNS"
-        done
-      fi
-    fi
-
-    # Reverse proxy (if selected)
-    if [ "$OPT_REVERSE_PROXY" = true ]; then
-      if [ "$HAS_WHIPTAIL" = true ]; then
-        PROXY_DOMAIN=$(_whip_input "Прокси" "Домен" "") || OPT_REVERSE_PROXY=false
-      else
-        PROXY_DOMAIN=$(text_input "Домен прокси" ""); [ -z "$PROXY_DOMAIN" ] && OPT_REVERSE_PROXY=false
-      fi
-    fi
-
-    # Remote backup (if selected)
-    if [ "$OPT_REMOTE_BACKUP" = true ]; then
-      if [ "$HAS_WHIPTAIL" = true ]; then
-        REMOTE_BACKUP_TARGET=$(_whip_input "Удал. бэкап" "ssh://user@host:/path" "") || OPT_REMOTE_BACKUP=false
-      else
-        REMOTE_BACKUP_TARGET=$(text_input "ssh://user@host:/path" ""); [ -z "$REMOTE_BACKUP_TARGET" ] && OPT_REMOTE_BACKUP=false
-      fi
-    fi
-
-    # Auto-reboot
-    if [ "$HAS_WHIPTAIL" = true ]; then
-      whiptail --title "Авто-перезагрузка" --yesno "Разрешить?\n(AppArmor может потребовать)" 10 55 2>/dev/null && OPT_AUTO_REBOOT=true
-    else
-      text_yesno "Авто-перезагрузка?" "y" && OPT_AUTO_REBOOT=true
-    fi
-
-    # --- Confirmation ---
-    local s="Установка Home Assistant Supervised\n\n"
-    s+="  Профиль:      ${PROFILE}\n"
-    s+="  Часовой пояс: ${OPT_TIMEZONE}\n"
-    s+="  Swap:         ${OPT_SWAP_SIZE:-zram}\n"
-    [ -n "$OPT_DATA_DIR" ]         && s+="  Данные:       ${OPT_DATA_DIR}\n"
-    [ -n "$OPT_WIFI_SSID" ]        && s+="  WiFi:         ${OPT_WIFI_SSID}\n"
-    [ -n "$OPT_DOCKER_MIRROR" ]    && s+="  Зеркало:      да\n"
-    [ -n "$OPT_RESTORE_BACKUP" ]   && s+="  Бэкап:        $(basename "$OPT_RESTORE_BACKUP")\n"
-    [ -n "$OPT_LOCALE" ]           && s+="  Локаль:       ${OPT_LOCALE}\n"
-    [ "$OPT_AUTO_REBOOT" = true ]  && s+="  Перезагрузка: авто\n"
-    [ "$OPT_TELEGRAM" = true ]     && s+="  Telegram:     да\n"
-    [ -n "$OPT_WEBHOOK_URL" ]      && s+="  Webhook:      да\n"
-    [ "$OPT_STATIC_IP" = true ]    && s+="  IP:           ${STATIC_IP}\n"
-    [ "$OPT_REVERSE_PROXY" = true ] && s+="  Прокси:       ${PROXY_DOMAIN}\n"
-    s+="\nНачать установку?\n(Нет = настроить заново)"
-
-    if [ "$HAS_WHIPTAIL" = true ]; then
-      whiptail --title "Подтверждение" --yesno "$s" 30 60 && return 0
+      whiptail --title "Подтверждение" --yesno "$qs" 12 50 && return 0
       _wizard_cancelled && return 1 || exit 0
     else
-      echo -e "\n$s" >&2
+      echo -e "\n$qs" >&2
       text_yesno "Начать?" "y" && return 0
       _wizard_cancelled && return 1 || exit 0
     fi
-  done
+  fi
+
+  # ===== Advanced / Expert options =====
+
+  # Locale (expert only)
+  if [ "$wizard_mode" = "expert" ]; then
+    local curloc; curloc=$(locale 2>/dev/null | awk -F= '/^LANG=/{print $2}') || curloc="C.UTF-8"
+    if [ "$HAS_WHIPTAIL" = true ]; then
+      if whiptail --title "Локаль" --yesno "Сменить локаль?\nТекущая: ${curloc}" 10 50 --defaultno 2>/dev/null; then
+        OPT_LOCALE=$(_whip_input "Локаль" "Например: ru_RU.UTF-8" "$curloc") || OPT_LOCALE=""
+      fi
+    else
+      text_yesno "Сменить локаль? (${curloc})" "n" && OPT_LOCALE=$(text_input "Локаль" "$curloc")
+    fi
+  fi
+
+  # Swap
+  local swap_rec="zram"
+  [ "$ram_mb" -lt 1500 ] && swap_rec="2048"
+  [ "$ram_mb" -gt 4000 ] && swap_rec="none"
+  if [ "$HAS_WHIPTAIL" = true ]; then
+    OPT_SWAP_SIZE=$(_whip_menu "Swap (RAM: ${ram_mb}МБ)" \
+      "zram" "ZRAM (2-4ГБ)" "1024" "1ГБ файл" "2048" "2ГБ файл" \
+      "4096" "4ГБ файл" "none" "Без swap")
+    [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
+  else
+    OPT_SWAP_SIZE=$(text_menu "Swap (${ram_mb}МБ, рек: ${swap_rec})" "Выберите:" \
+      "zram" "ZRAM" "1024" "1ГБ" "2048" "2ГБ" "none" "Без swap") || OPT_SWAP_SIZE="$swap_rec"
+  fi
+
+  # Data dir
+  local dw=""; [ "$disk_mb" -lt 20000 ] && dw=" (${disk_mb}МБ!)"
+  if [ "$HAS_WHIPTAIL" = true ]; then
+    if whiptail --title "Внешний диск" --yesno "Использовать?${dw}" 10 55 --defaultno 2>/dev/null; then
+      local mi; mi=$(lsblk -o NAME,SIZE,MOUNTPOINT,FSTYPE 2>/dev/null | grep -E "sd|nvme" | head -10)
+      OPT_DATA_DIR=$(_whip_input "Путь к данным" "${mi}" "/mnt/data") || OPT_DATA_DIR=""
+    fi
+  else
+    if text_yesno "Внешний диск?${dw}" "n"; then
+      OPT_DATA_DIR=$(text_input "Путь к данным" "/mnt/data")
+    fi
+  fi
+
+  # WiFi
+  local has_wifi=false
+  { iw dev 2>/dev/null | grep -q Interface || ip link 2>/dev/null | grep -q wlan; } && has_wifi=true
+  if [ "$has_wifi" = true ]; then
+    local do_wifi=false
+    if [ "$HAS_WHIPTAIL" = true ]; then
+      whiptail --title "WiFi" --yesno "Адаптер найден. Настроить?" 8 50 --defaultno 2>/dev/null && do_wifi=true
+    else
+      text_yesno "WiFi найден. Настроить?" "n" && do_wifi=true
+    fi
+    if [ "$do_wifi" = true ]; then
+      local wl; wl=$(nmcli -t -f SSID dev wifi list 2>/dev/null | sort -u | head -10 | tr '\n' ', ') || wl=""
+      if [ "$HAS_WHIPTAIL" = true ]; then
+        OPT_WIFI_SSID=$(_whip_input "WiFi SSID" "Рядом: ${wl}" "") || OPT_WIFI_SSID=""
+        [ -n "$OPT_WIFI_SSID" ] && {
+          OPT_WIFI_PASS=$(whiptail --title "Пароль WiFi" --passwordbox "Пароль:" 10 50 3>&1 1>&2 2>&3) || OPT_WIFI_SSID=""
+        }
+      else
+        [ -n "$wl" ] && echo -e "   Рядом: ${wl}" >&2
+        OPT_WIFI_SSID=$(text_input "SSID" "")
+        [ -n "$OPT_WIFI_SSID" ] && OPT_WIFI_PASS=$(text_password "Пароль WiFi")
+      fi
+    fi
+  fi
+
+  # Docker mirror (expert only)
+  if [ "$wizard_mode" = "expert" ]; then
+    if [ "$HAS_WHIPTAIL" = true ]; then
+      if whiptail --title "Зеркало Docker" --yesno "Если заблокирован" 8 50 --defaultno 2>/dev/null; then
+        OPT_DOCKER_MIRROR=$(_whip_input "URL зеркала" "" "") || OPT_DOCKER_MIRROR=""
+      fi
+    else
+      text_yesno "Зеркало Docker?" "n" && OPT_DOCKER_MIRROR=$(text_input "URL" "")
+    fi
+  fi
+
+  # Notifications — if Telegram selected in components
+  if [ "$OPT_TELEGRAM" = true ]; then
+    if [ "$HAS_WHIPTAIL" = true ]; then
+      TG_TOKEN=$(_whip_input "Telegram" "Токен бота" "") || TG_TOKEN=""
+      [ -n "$TG_TOKEN" ] && { TG_CHAT=$(_whip_input "Telegram" "Chat ID" "") || TG_CHAT=""; }
+    else
+      TG_TOKEN=$(text_input "Токен бота" "")
+      [ -n "$TG_TOKEN" ] && TG_CHAT=$(text_input "Chat ID" "")
+    fi
+    { [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; } && OPT_TELEGRAM=false
+  fi
+
+  # Notifications — general menu if no method yet
+  if [ "$OPT_TELEGRAM" != true ] && [ -z "$OPT_WEBHOOK_URL" ]; then
+    local notif="none"
+    if [ "$HAS_WHIPTAIL" = true ]; then
+      notif=$(_whip_menu "Уведомления" \
+        "none" "Без уведомлений" "telegram" "Telegram" \
+        "ntfy" "ntfy.sh (бесплатно)" "discord" "Discord" "custom" "Свой webhook")
+      [ $? -ne 0 ] && notif="none"
+    else
+      notif=$(text_menu "Уведомления" "Способ:" \
+        "none" "Нет" "telegram" "Telegram" "ntfy" "ntfy.sh" \
+        "discord" "Discord" "custom" "URL") || notif="none"
+    fi
+    case "$notif" in
+      telegram)
+        OPT_TELEGRAM=true
+        if [ "$HAS_WHIPTAIL" = true ]; then
+          TG_TOKEN=$(_whip_input "Telegram" "Токен бота" "") || TG_TOKEN=""
+          [ -n "$TG_TOKEN" ] && { TG_CHAT=$(_whip_input "Telegram" "Chat ID" "") || TG_CHAT=""; }
+        else
+          TG_TOKEN=$(text_input "Токен бота" "")
+          [ -n "$TG_TOKEN" ] && TG_CHAT=$(text_input "Chat ID" "")
+        fi
+        { [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; } && OPT_TELEGRAM=false
+        ;;
+      ntfy)
+        local topic=""
+        if [ "$HAS_WHIPTAIL" = true ]; then
+          topic=$(_whip_input "ntfy.sh" "Название темы" "ha-$(hostname 2>/dev/null || echo box)") || topic=""
+        else
+          topic=$(text_input "Тема ntfy.sh" "ha-$(hostname 2>/dev/null || echo box)")
+        fi
+        [ -n "$topic" ] && OPT_WEBHOOK_URL="https://ntfy.sh/${topic}"
+        ;;
+      discord|custom)
+        if [ "$HAS_WHIPTAIL" = true ]; then
+          OPT_WEBHOOK_URL=$(_whip_input "Webhook" "URL" "") || OPT_WEBHOOK_URL=""
+        else
+          OPT_WEBHOOK_URL=$(text_input "Webhook URL" "")
+        fi
+        ;;
+    esac
+  fi
+
+  # Restore backup
+  local do_restore=false
+  if [ "$HAS_WHIPTAIL" = true ]; then
+    whiptail --title "Бэкап" --yesno "Восстановить после установки?" 8 50 --defaultno 2>/dev/null && do_restore=true
+  else
+    text_yesno "Восстановить бэкап?" "n" && do_restore=true
+  fi
+  if [ "$do_restore" = true ]; then
+    local found=""
+    for d in /mnt /media /tmp /var/backups; do
+      local fb; fb=$(find "$d" -maxdepth 3 -name "ha_config_*.tar.gz" -type f 2>/dev/null | head -3)
+      [ -n "$fb" ] && found="${found}${fb}"$'\n'
+    done
+    if [ "$HAS_WHIPTAIL" = true ]; then
+      local hint=""; [ -n "$found" ] && hint="\nНайдены:\n${found}"
+      OPT_RESTORE_BACKUP=$(_whip_input "Файл бэкапа" "Путь:${hint}" "") || OPT_RESTORE_BACKUP=""
+    else
+      [ -n "$found" ] && { echo -e "   Бэкапы:" >&2; echo "$found" | while IFS= read -r l; do [ -n "$l" ] && echo "   $l" >&2; done; }
+      OPT_RESTORE_BACKUP=$(text_input "Путь к .tar.gz" "")
+    fi
+    [ -n "$OPT_RESTORE_BACKUP" ] && [ ! -f "$OPT_RESTORE_BACKUP" ] && {
+      msg_warn "Файл не найден: ${OPT_RESTORE_BACKUP}"; OPT_RESTORE_BACKUP=""
+    }
+  fi
+
+  # Static IP (if selected in components)
+  if [ "$OPT_STATIC_IP" = true ]; then
+    local cip; cip=$(hostname -I 2>/dev/null | awk '{print $1}') || cip=""
+    local cgw; cgw=$(ip route 2>/dev/null | awk '/default/{print $3}' | head -1) || cgw=""
+    while true; do
+      if [ "$HAS_WHIPTAIL" = true ]; then
+        STATIC_IP=$(_whip_input "Стат. IP" "IP-адрес" "$cip") || { OPT_STATIC_IP=false; break; }
+      else
+        STATIC_IP=$(text_input "Статический IP" "$cip")
+        [ -z "$STATIC_IP" ] && { OPT_STATIC_IP=false; break; }
+      fi
+      validate_ip "$STATIC_IP" && break
+      msg_warn "Неверный IP"
+    done
+    if [ "$OPT_STATIC_IP" = true ]; then
+      while true; do
+        if [ "$HAS_WHIPTAIL" = true ]; then
+          STATIC_GW=$(_whip_input "Шлюз" "" "$cgw") || { STATIC_GW="$cgw"; break; }
+        else
+          STATIC_GW=$(text_input "Шлюз" "$cgw")
+        fi
+        validate_gw "$STATIC_GW" && break
+        msg_warn "Неверный шлюз"
+      done
+      while true; do
+        if [ "$HAS_WHIPTAIL" = true ]; then
+          STATIC_DNS=$(_whip_input "DNS" "Через запятую" "8.8.8.8,1.1.1.1") || { STATIC_DNS="8.8.8.8,1.1.1.1"; break; }
+        else
+          STATIC_DNS=$(text_input "DNS (через запятую)" "8.8.8.8,1.1.1.1")
+        fi
+        validate_dns_list "$STATIC_DNS" && break
+        msg_warn "Неверный DNS"
+      done
+    fi
+  fi
+
+  # Reverse proxy (if selected)
+  if [ "$OPT_REVERSE_PROXY" = true ]; then
+    if [ "$HAS_WHIPTAIL" = true ]; then
+      PROXY_DOMAIN=$(_whip_input "Прокси" "Домен" "") || OPT_REVERSE_PROXY=false
+    else
+      PROXY_DOMAIN=$(text_input "Домен прокси" "")
+      [ -z "$PROXY_DOMAIN" ] && OPT_REVERSE_PROXY=false
+    fi
+  fi
+
+  # Remote backup (if selected)
+  if [ "$OPT_REMOTE_BACKUP" = true ]; then
+    if [ "$HAS_WHIPTAIL" = true ]; then
+      REMOTE_BACKUP_TARGET=$(_whip_input "Удал. бэкап" "ssh://user@host:/path" "") || OPT_REMOTE_BACKUP=false
+    else
+      REMOTE_BACKUP_TARGET=$(text_input "ssh://user@host:/path" "")
+      [ -z "$REMOTE_BACKUP_TARGET" ] && OPT_REMOTE_BACKUP=false
+    fi
+  fi
+
+  # Auto-reboot
+  if [ "$HAS_WHIPTAIL" = true ]; then
+    whiptail --title "Авто-перезагрузка" --yesno "Разрешить?\n(AppArmor может потребовать)" 10 55 2>/dev/null && OPT_AUTO_REBOOT=true
+  else
+    text_yesno "Авто-перезагрузка?" "y" && OPT_AUTO_REBOOT=true
+  fi
+
+  # --- Confirmation ---
+  local s="Установка Home Assistant Supervised\n\n"
+  s+="  Профиль:      ${PROFILE}\n"
+  s+="  Часовой пояс: ${OPT_TIMEZONE}\n"
+  s+="  Swap:         ${OPT_SWAP_SIZE:-zram}\n"
+  [ -n "$OPT_DATA_DIR" ]         && s+="  Данные:       ${OPT_DATA_DIR}\n"
+  [ -n "$OPT_WIFI_SSID" ]        && s+="  WiFi:         ${OPT_WIFI_SSID}\n"
+  [ -n "$OPT_DOCKER_MIRROR" ]    && s+="  Зеркало:      да\n"
+  [ -n "$OPT_RESTORE_BACKUP" ]   && s+="  Бэкап:        $(basename "$OPT_RESTORE_BACKUP")\n"
+  [ -n "$OPT_LOCALE" ]           && s+="  Локаль:       ${OPT_LOCALE}\n"
+  [ "$OPT_AUTO_REBOOT" = true ]  && s+="  Перезагрузка: авто\n"
+  [ "$OPT_TELEGRAM" = true ]     && s+="  Telegram:     да\n"
+  [ -n "$OPT_WEBHOOK_URL" ]      && s+="  Webhook:      да\n"
+  [ "$OPT_STATIC_IP" = true ]    && s+="  IP:           ${STATIC_IP}\n"
+  [ "$OPT_REVERSE_PROXY" = true ] && s+="  Прокси:       ${PROXY_DOMAIN}\n"
+  s+="\nНачать установку?\n(Нет = вернуться в меню)"
+
+  if [ "$HAS_WHIPTAIL" = true ]; then
+    whiptail --title "Подтверждение" --yesno "$s" 30 60 && return 0
+    _wizard_cancelled && return 1 || exit 0
+  else
+    echo -e "\n$s" >&2
+    text_yesno "Начать?" "y" && return 0
+    _wizard_cancelled && return 1 || exit 0
+  fi
 }
 
 # ============================================================================
