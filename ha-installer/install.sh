@@ -1557,7 +1557,6 @@ run_wizard() {
   local disk_mb; disk_mb=$(df -m / | awk 'NR==2{print $4}')
 
   # Outer loop: allows restarting wizard from beginning
-  while true; do
     # Reset all wizard options for clean restart
     PROFILE=""
     OPT_TIMEZONE=""; OPT_LOCALE=""; OPT_SWAP_SIZE=""; OPT_DATA_DIR=""
@@ -1581,14 +1580,14 @@ run_wizard() {
 
     # --- Step 1: Mode ---
     if [ "$HAS_WHIPTAIL" = true ]; then
-      wizard_mode=$(_whip_menu "Шаг 1: Режим" \
+      wizard_mode=$(_whip_menu "Режим установки" \
         "quick"    "Быстрый (профиль + часовой пояс)" \
         "advanced" "Расширенный (все настройки)" \
         "expert"   "Эксперт (компоненты + всё)")
-      [ $? -ne 0 ] && { echo "Отменено."; exit 0; }
+      [ $? -ne 0 ] && return 1
     else
-      wizard_mode=$(text_menu "Шаг 1: Режим" "Выберите:" \
-        "quick" "Быстрый" "advanced" "Расширенный" "expert" "Эксперт") || { echo "Отменено."; exit 0; }
+      wizard_mode=$(text_menu "Режим установки" "Выберите:" \
+        "quick" "Быстрый" "advanced" "Расширенный" "expert" "Эксперт") || return 1
     fi
 
     # --- Step 2: Benchmark (not in quick) ---
@@ -1653,11 +1652,11 @@ run_wizard() {
       local qs="Быстрая установка:\n\n  Профиль: ${PROFILE}\n  Часовой пояс: ${OPT_TIMEZONE}\n\nНачать?"
       if [ "$HAS_WHIPTAIL" = true ]; then
         whiptail --title "Подтверждение" --yesno "$qs" 12 50 && return 0
-        _wizard_cancelled && continue || exit 0
+        _wizard_cancelled && return 1 || exit 0
       else
         echo -e "\n$qs" >&2
         text_yesno "Начать?" "y" && return 0
-        _wizard_cancelled && continue || exit 0
+        _wizard_cancelled && return 1 || exit 0
       fi
     fi
 
@@ -1888,12 +1887,11 @@ run_wizard() {
 
     if [ "$HAS_WHIPTAIL" = true ]; then
       whiptail --title "Подтверждение" --yesno "$s" 30 60 && return 0
-      # No/ESC = restart wizard
-      continue
+      _wizard_cancelled && return 1 || exit 0
     else
       echo -e "\n$s" >&2
       text_yesno "Начать?" "y" && return 0
-      continue
+      _wizard_cancelled && return 1 || exit 0
     fi
   done
 }
@@ -3654,27 +3652,42 @@ main() {
   # Профиль из CLI
   [ -n "$PROFILE" ] && apply_profile "$PROFILE"
 
-  # Интерактив: меню если без аргументов
+  # Интерактивный режим: цикл меню → wizard → меню
   if [ $# -eq 0 ] && [ "$RUN_WIZARD" = true ]; then
-    if [ -t 0 ] && [ -t 1 ]; then
-      show_main_menu || true
-    fi
+    while true; do
+      if [ -t 0 ] && [ -t 1 ]; then
+        show_main_menu || exit 0  # ESC в меню = выход
+      fi
+
+      # Обработка выбора из меню
+      [ "$CHECK_ONLY" = true ]      && { show_banner; do_check; exit 0; }
+      [ "$SHOW_STATUS" = true ]     && { do_status; exit 0; }
+      [ "$UNINSTALL" = true ]       && { show_banner; acquire_lock; do_uninstall; exit 0; }
+      [ "$DO_UPDATE" = true ]       && { show_banner; acquire_lock; do_update; exit 0; }
+      [ "$DO_SELF_UPDATE" = true ]  && { show_banner; do_self_update; exit 0; }
+      [ "$DO_SELF_TEST" = true ]    && { show_banner; do_self_test; exit $?; }
+      [ "$DO_BENCHMARK" = true ]    && { show_banner; do_benchmark; exit 0; }
+      [ "$DO_EXPORT_CONFIG" = true ] && { show_banner; export_config; exit 0; }
+      [ "$DO_SHOW_HISTORY" = true ] && { show_banner; show_history; exit 0; }
+
+      # install выбран → wizard
+      if [ "$RUN_WIZARD" = true ] && [ "$DRY_RUN" = false ]; then
+        if run_wizard; then
+          break  # wizard вернул 0 = начать установку
+        else
+          # wizard вернул 1 = обратно в меню
+          # Сбросить флаги
+          RUN_WIZARD=true
+          CHECK_ONLY=false; SHOW_STATUS=false; UNINSTALL=false
+          DO_UPDATE=false; DO_SELF_UPDATE=false; DO_SELF_TEST=false
+          DO_BENCHMARK=false; DO_EXPORT_CONFIG=false; DO_SHOW_HISTORY=false
+          continue  # показать меню снова
+        fi
+      fi
+
+      break  # если не wizard — выходим из цикла к установке
+    done
   fi
-
-  # Повторная проверка после выбора в меню
-  # (show_main_menu устанавливает флаги но не выполняет операции)
-  [ "$CHECK_ONLY" = true ]      && { show_banner; do_check; exit 0; }
-  [ "$SHOW_STATUS" = true ]     && { do_status; exit 0; }
-  [ "$UNINSTALL" = true ]       && { show_banner; acquire_lock; do_uninstall; exit 0; }
-  [ "$DO_UPDATE" = true ]       && { show_banner; acquire_lock; do_update; exit 0; }
-  [ "$DO_SELF_UPDATE" = true ]  && { show_banner; do_self_update; exit 0; }
-  [ "$DO_SELF_TEST" = true ]    && { show_banner; do_self_test; exit $?; }
-  [ "$DO_BENCHMARK" = true ]    && { show_banner; do_benchmark; exit 0; }
-  [ "$DO_EXPORT_CONFIG" = true ] && { show_banner; export_config; exit 0; }
-  [ "$DO_SHOW_HISTORY" = true ] && { show_banner; show_history; exit 0; }
-
-  # Если дошли сюда — это установка (install)
-  [ "$RUN_WIZARD" = true ] && [ "$DRY_RUN" = false ] && run_wizard
 
   # Nohup ТОЛЬКО для установки (после wizard, до начала шагов)
   auto_nohup_if_ssh
