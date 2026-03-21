@@ -2837,8 +2837,11 @@ step_extras() {
   local sid="extras"; is_done "$sid" && return 0
   header "[${CURRENT_STEP_NUM}/${TOTAL_STEPS}] УТИЛИТЫ"
 
-  [ "$OPT_HOSTNAME" = true ] && {
-    hostnamectl set-hostname homeassistant 2>/dev/null || true
+      [ "$OPT_HOSTNAME" = true ] && {
+        if [ ! -f "${BACKUP_DIR}/hostname.bak" ]; then
+            hostname > "${BACKUP_DIR}/hostname.bak" 2>/dev/null || true
+        fi
+        hostnamectl set-hostname homeassistant 2>/dev/null || true
     msg_ok "Имя хоста: homeassistant"
   }
 
