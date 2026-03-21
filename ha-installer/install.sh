@@ -612,22 +612,35 @@ estimate_install_time() {
   msg_info "Примерное время: ~${est_min} мин"
 }
 
+# =========================================================================
+# SAFE SCRIPT PATH
+# =========================================================================
+ensure_safe_script_path() {
+    if [ ! -f "$SAFE_SCRIPT_PATH" ] || ! cmp -s "$0" "$SAFE_SCRIPT_PATH" 2>/dev/null; then
+        cp "$0" "$SAFE_SCRIPT_PATH" 2>/dev/null || true
+        chmod +x "$SAFE_SCRIPT_PATH" 2>/dev/null || true
+    fi
+}
+
 # ============================================================================
 # REBOOT CONTINUE (with attempt counter + /tmp safety)
 # ============================================================================
 setup_reboot_continue() {
-  ensure_safe_script_path
-  local svc_file="/etc/systemd/system/${REBOOT_CONTINUE_SVC}.service"
-  local attempts=0
-  [ -f "$REBOOT_ATTEMPT_FILE" ] && attempts=$(cat "$REBOOT_ATTEMPT_FILE" 2>/dev/null || echo 0)
-  if [ "$attempts" -ge 3 ]; then
-    msg_error "Превышен лимит перезагрузок (3)"
-    rm -f "$REBOOT_ATTEMPT_FILE"
-    return 1
-  fi
-  echo $((attempts + 1)) > "$REBOOT_ATTEMPT_FILE"
+    local continue_from="${1:-apparmor}"
+    ensure_safe_script_path
+    local svc_file="/etc/systemd/system/${REBOOT_CONTINUE_SVC}.service"
+    local attempts=0
+    [ -f "$REBOOT_ATTEMPT_FILE" ] && attempts=$(cat "$REBOOT_ATTEMPT_FILE" 2>/dev/null || echo 0)
 
-  cat > "$svc_file" << SVCEOF
+    if [ "$attempts" -ge 3 ]; then
+        msg_error "Превышен лимит перезагрузок (3)"
+        rm -f "$REBOOT_ATTEMPT_FILE"
+        return 1
+    fi
+
+    echo $((attempts + 1)) > "$REBOOT_ATTEMPT_FILE"
+
+    cat > "$svc_file" << SVCEOF
 [Unit]
 Description=HA Installer - продолжение после перезагрузки
 After=network-online.target
@@ -635,7 +648,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash ${SAFE_SCRIPT_PATH} ${ORIGINAL_ARGS} --from-step=perf
+ExecStart=/bin/bash ${SAFE_SCRIPT_PATH} ${ORIGINAL_ARGS} --from-step=${continue_from}
 ExecStartPost=/bin/rm -f ${svc_file}
 RemainAfterExit=no
 StandardOutput=append:${LOG_DIR}/ha_install_reboot.log
@@ -645,9 +658,9 @@ StandardError=append:${LOG_DIR}/ha_install_reboot.log
 WantedBy=multi-user.target
 SVCEOF
 
-  systemctl daemon-reload 2>/dev/null || true
-  systemctl enable "${REBOOT_CONTINUE_SVC}" 2>/dev/null || true
-  msg_ok "Продолжит после перезагрузки (попытка $((attempts+1))/3)"
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable "${REBOOT_CONTINUE_SVC}" 2>/dev/null || true
+    msg_ok "Продолжит после перезагрузки с шага '${continue_from}' (попытка $((attempts+1))/3)"
 }
 
 remove_reboot_continue() {
@@ -2380,50 +2393,128 @@ step_configure_network() {
 # ШАГ: APPARMOR
 # ============================================================================
 step_configure_apparmor() {
-  local sid="apparmor"; is_done "$sid" && return 0
-  header "[${CURRENT_STEP_NUM}/${TOTAL_STEPS}] APPARMOR"
+    local sid="apparmor"; is_done "$sid" && return 0
+    header "[${CURRENT_STEP_NUM}/${TOTAL_STEPS}] APPARMOR"
 
-  local aa; aa=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null) || aa="N"
+    local aa
+    aa=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null) || aa="N"
 
-  if [ "$aa" = "Y" ]; then
-    msg_ok "AppArmor активен"
-  else
+    # AppArmor уже активен в ядре — всё ок
+    if [ "$aa" = "Y" ]; then
+        msg_ok "AppArmor активен в ядре"
+        systemctl enable apparmor 2>/dev/null || true
+        systemctl start apparmor 2>/dev/null || true
+        mark_done "$sid"
+        return 0
+    fi
+
+    # AppArmor НЕ активен — нужно патчить загрузчик и перезагружаться
+    msg_warn "AppArmor не активен в ядре"
+
     local patched=false
     for f in /boot/armbianEnv.txt /boot/uEnv.txt /boot/extlinux/extlinux.conf; do
-      [ -f "$f" ] || continue
-      cp "$f" "${BACKUP_DIR}/$(basename "$f").bak" 2>/dev/null
-      grep -q "apparmor=1" "$f" && { patched=true; continue; }
-      if [[ "$f" == *extlinux.conf ]]; then
-        sed -i '/^[[:space:]]*append/ s/$/ apparmor=1 security=apparmor/' "$f"
-      else
-        grep -q "^extraargs=" "$f" && \
-          sed -i 's|^extraargs=.*|& apparmor=1 security=apparmor|' "$f" || \
-          echo "extraargs=apparmor=1 security=apparmor" >> "$f"
-      fi
-      msg_ok "$(basename "$f")"
-      patched=true
+        [ -f "$f" ] || continue
+        cp "$f" "${BACKUP_DIR}/$(basename "$f").bak" 2>/dev/null
+
+        # Уже пропатчен — пропустить
+        grep -q "apparmor=1" "$f" && { patched=true; continue; }
+
+        if [[ "$f" == *extlinux.conf ]]; then
+            sed -i '/^[[:space:]]*append/ s/$/ apparmor=1 security=apparmor/' "$f"
+        else
+            grep -q "^extraargs=" "$f" && \
+                sed -i 's|^extraargs=.*|& apparmor=1 security=apparmor|' "$f" || \
+                echo "extraargs=apparmor=1 security=apparmor" >> "$f"
+        fi
+        msg_ok "$(basename "$f") пропатчен"
+        patched=true
     done
 
-    if [ "$patched" = true ]; then
-      msg_warn "AppArmor требует перезагрузки"
-      if [ "$OPT_AUTO_REBOOT" = true ]; then
-        msg_action "Авто-перезагрузка через 10с..."
-        if setup_reboot_continue; then
-          sleep 10
-          reboot
-          exit 0
-        else
-          msg_warn "Не удалось настроить продолжение, работаем дальше"
-        fi
-      fi
-    else
-      msg_error "Конфиг загрузчика не найден"
+    # Загрузчик не найден — продолжить без AppArmor
+    if [ "$patched" != true ]; then
+        msg_error "Конфиг загрузчика не найден!"
+        msg_dim "AppArmor не будет активен. HA может работать с предупреждениями."
+        msg_dim "Добавьте вручную в параметры загрузки: apparmor=1 security=apparmor"
+        mark_done "$sid"
+        return 0
     fi
-  fi
 
-  systemctl enable apparmor 2>/dev/null || true
-  systemctl start apparmor 2>/dev/null || true
-  mark_done "$sid"
+    # Загрузчик пропатчен — ОБЯЗАТЕЛЬНО нужна перезагрузка
+    msg_warn "Требуется перезагрузка для активации AppArmor"
+
+    # --- Авто-перезагрузка ---
+    if [ "$OPT_AUTO_REBOOT" = true ]; then
+        msg_action "Настройка продолжения после перезагрузки..."
+        if setup_reboot_continue "apparmor"; then
+            # НЕ помечаем шаг как done — после reboot он проверится снова
+            # и увидит что aa="Y", выполнит enable+start, пометит done
+            save_config
+            msg_ok "Перезагрузка через 10 секунд..."
+            msg_dim "Установка продолжится автоматически после загрузки"
+            sleep 10
+            sync
+            reboot
+            # На случай если reboot не мгновенный
+            sleep 30
+            exit 0
+        else
+            msg_error "Не удалось настроить продолжение после перезагрузки"
+        fi
+    fi
+
+    # --- Авто-перезагрузка отключена или не удалась — спросить пользователя ---
+    if [ -t 0 ]; then
+        echo ""
+        msg_warn "AppArmor требует перезагрузки!"
+        msg_info "Варианты:"
+        msg_dim "  1) Перезагрузить сейчас (установка продолжится автоматически)"
+        msg_dim "  2) Продолжить без перезагрузки (HA будет работать с предупреждениями)"
+        msg_dim "  3) Выйти (перезагрузите вручную и запустите скрипт снова)"
+        echo ""
+        echo -en " ${ARROW} Выбор [1/2/3]: " >&2
+        local choice
+        read -r -t 60 choice || choice="2"
+
+        case "$choice" in
+            1)
+                msg_action "Настройка продолжения..."
+                if setup_reboot_continue "apparmor"; then
+                    save_config
+                    msg_ok "Перезагрузка..."
+                    sleep 3
+                    sync
+                    reboot
+                    sleep 30
+                    exit 0
+                else
+                    msg_error "Не удалось настроить продолжение"
+                    msg_info "Перезагрузите вручную и запустите:"
+                    msg_dim "  sudo reboot"
+                    msg_dim "  sudo bash ${SAFE_SCRIPT_PATH:-$0} --from-step=apparmor"
+                    exit 1
+                fi
+                ;;
+            3)
+                msg_info "Перезагрузите и запустите скрипт снова:"
+                msg_dim "  sudo reboot"
+                msg_dim "  sudo bash ${SAFE_SCRIPT_PATH:-$0} --from-step=apparmor"
+                exit 0
+                ;;
+            2|*)
+                msg_warn "Продолжение без AppArmor"
+                msg_dim "HA будет работать, но покажет предупреждение о неподдерживаемой системе"
+                msg_dim "Для активации позже: sudo reboot"
+                ;;
+        esac
+    else
+        # Не интерактивный режим — продолжить без перезагрузки
+        msg_warn "Продолжение без AppArmor (не интерактивный режим)"
+    fi
+
+    # Включить сервис (запустится полноценно после reboot когда модуль ядра загрузится)
+    systemctl enable apparmor 2>/dev/null || true
+
+    mark_done "$sid"
 }
 
 # ============================================================================
