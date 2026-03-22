@@ -615,16 +615,6 @@ estimate_install_time() {
 # =========================================================================
 # SAFE SCRIPT PATH
 # =========================================================================
-ensure_safe_script_path() {
-    if [ ! -f "$SAFE_SCRIPT_PATH" ] || ! cmp -s "$0" "$SAFE_SCRIPT_PATH" 2>/dev/null; then
-        cp "$0" "$SAFE_SCRIPT_PATH" 2>/dev/null || true
-        chmod +x "$SAFE_SCRIPT_PATH" 2>/dev/null || true
-    fi
-}
-
-# ============================================================================
-# REBOOT CONTINUE (with attempt counter + /tmp safety)
-# ============================================================================
 setup_reboot_continue() {
     local continue_from="${1:-apparmor}"
     ensure_safe_script_path
@@ -2399,7 +2389,6 @@ step_configure_apparmor() {
     local aa
     aa=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null) || aa="N"
 
-    # AppArmor уже активен в ядре — всё ок
     if [ "$aa" = "Y" ]; then
         msg_ok "AppArmor активен в ядре"
         systemctl enable apparmor 2>/dev/null || true
@@ -2408,15 +2397,12 @@ step_configure_apparmor() {
         return 0
     fi
 
-    # AppArmor НЕ активен — нужно патчить загрузчик и перезагружаться
     msg_warn "AppArmor не активен в ядре"
 
     local patched=false
     for f in /boot/armbianEnv.txt /boot/uEnv.txt /boot/extlinux/extlinux.conf; do
         [ -f "$f" ] || continue
         cp "$f" "${BACKUP_DIR}/$(basename "$f").bak" 2>/dev/null
-
-        # Уже пропатчен — пропустить
         grep -q "apparmor=1" "$f" && { patched=true; continue; }
 
         if [[ "$f" == *extlinux.conf ]]; then
@@ -2430,7 +2416,6 @@ step_configure_apparmor() {
         patched=true
     done
 
-    # Загрузчик не найден — продолжить без AppArmor
     if [ "$patched" != true ]; then
         msg_error "Конфиг загрузчика не найден!"
         msg_dim "AppArmor не будет активен. HA может работать с предупреждениями."
@@ -2439,22 +2424,17 @@ step_configure_apparmor() {
         return 0
     fi
 
-    # Загрузчик пропатчен — ОБЯЗАТЕЛЬНО нужна перезагрузка
     msg_warn "Требуется перезагрузка для активации AppArmor"
 
-    # --- Авто-перезагрузка ---
     if [ "$OPT_AUTO_REBOOT" = true ]; then
         msg_action "Настройка продолжения после перезагрузки..."
         if setup_reboot_continue "apparmor"; then
-            # НЕ помечаем шаг как done — после reboot он проверится снова
-            # и увидит что aa="Y", выполнит enable+start, пометит done
             save_config
             msg_ok "Перезагрузка через 10 секунд..."
             msg_dim "Установка продолжится автоматически после загрузки"
             sleep 10
             sync
             reboot
-            # На случай если reboot не мгновенный
             sleep 30
             exit 0
         else
@@ -2462,7 +2442,6 @@ step_configure_apparmor() {
         fi
     fi
 
-    # --- Авто-перезагрузка отключена или не удалась — спросить пользователя ---
     if [ -t 0 ]; then
         echo ""
         msg_warn "AppArmor требует перезагрузки!"
@@ -2507,13 +2486,10 @@ step_configure_apparmor() {
                 ;;
         esac
     else
-        # Не интерактивный режим — продолжить без перезагрузки
         msg_warn "Продолжение без AppArmor (не интерактивный режим)"
     fi
 
-    # Включить сервис (запустится полноценно после reboot когда модуль ядра загрузится)
     systemctl enable apparmor 2>/dev/null || true
-
     mark_done "$sid"
 }
 
