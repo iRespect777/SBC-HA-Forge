@@ -3620,7 +3620,7 @@ do_rescue() {
     # --- 3. Сеть ---
     msg_action "[3/8] Сеть..."
     local ip
-    iface=$(ip -o link show 2>/dev/null | awk -F': ' '!/lo/{print $2; exit}' | cut -d'@' -f1)
+    ip=$(hostname -I 2>/dev/null | awk '{print $1}')
     if [ -z "$ip" ]; then
         msg_error "Нет IP-адреса!"
         msg_action "Восстановление сети..."
@@ -3635,7 +3635,7 @@ do_rescue() {
         # Попытка 2: ifupdown
         if [ -z "$ip" ]; then
             local iface
-            iface=$(ip -o link show 2>/dev/null | awk -F': ' '!/lo/{print $2; exit}')
+            iface=$(ip -o link show 2>/dev/null | awk -F': ' '!/lo/{print $2; exit}' | cut -d'@' -f1)
             if [ -n "$iface" ]; then
                 ip link set "$iface" up 2>/dev/null || true
                 if command -v dhclient &>/dev/null; then
