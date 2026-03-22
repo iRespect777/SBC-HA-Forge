@@ -4843,8 +4843,6 @@ main() {
                         [ "$CHECK_ONLY" = true ]   && { show_banner; do_check; exit 0; }
                         [ "$SHOW_STATUS" = true ]  && { do_status; exit 0; }
                         [ "$DO_UPDATE" = true ]    && { show_banner; acquire_lock; do_update; exit 0; }
-                    elif [ $ci_rc -eq 1 ]; then
-                        break
                     fi
                 fi
                 show_main_menu || exit 0
