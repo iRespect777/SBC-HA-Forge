@@ -71,6 +71,7 @@ SKIP_UPDATE=false; CHECK_ONLY=false; UNINSTALL=false
 DRY_RUN=false; SILENT=false; SHOW_STATUS=false
 DO_UPDATE=false; DO_SELF_TEST=false; DO_SELF_UPDATE=false
 DO_EXPORT_CONFIG=false; DO_SHOW_HISTORY=false; DO_BENCHMARK=false
+DO_RESCUE=false
 INTERACTIVE_STEPS=false
 HA_MACHINE="$HA_DEFAULT_MACHINE"; MACHINE_EXPLICIT=false
 OVERRIDE_OS_AGENT_VER=""; OVERRIDE_HA_VER=""
@@ -4871,7 +4872,7 @@ main() {
           RUN_WIZARD=true
           CHECK_ONLY=false; SHOW_STATUS=false; UNINSTALL=false
           DO_UPDATE=false; DO_SELF_UPDATE=false; DO_SELF_TEST=false
-          DO_BENCHMARK=false; DO_RESCUE=false; DO_EXPORT_CONFIG=false; DO_SHOW_HISTORY=false
+          DO_BENCHMARK=false; DO_EXPORT_CONFIG=false; DO_SHOW_HISTORY=false
           continue  # показать меню снова
         fi
       fi
