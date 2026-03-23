@@ -2618,7 +2618,14 @@ step_install_docker() {
     apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
     detect_system_info
     local codename="${CACHED_CODENAME}"
-    [[ "$codename" == "trixie" ]] && codename="bookworm"
+        # Проверить что репозиторий Docker существует для этого codename
+        if [ -n "$codename" ] && [ "$codename" != "sid" ]; then
+            # Для sid используем trixie
+            [[ "$codename" == "sid" ]] && codename="trixie"
+        else
+            # Неизвестный codename — fallback на bookworm
+            codename="bookworm"
+        fi
 
     local docker_ok=false
     if command -v curl &>/dev/null; then
