@@ -1979,113 +1979,6 @@ run_wizard() {
   fi
 }
 
-# =========================================================================
-# ПРОВЕРКА СУЩЕСТВУЮЩЕЙ УСТАНОВКИ
-# =========================================================================
-check_existing_installation() {
-    # Проверяем работает ли HA
-    if ! systemctl is-active --quiet hassio-supervisor 2>/dev/null; then
-        return 1  # не установлен — продолжить к wizard
-    fi
-
-    local ip
-    ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-
-    if command -v whiptail &>/dev/null; then
-        local action
-        action=$(whiptail --title "HA уже установлен" --menu \
-            "Home Assistant уже работает!\n\nДоступен: http://${ip:-localhost}:8123\n\nЧто сделать?" 18 60 6 \
-            "menu"      "Меню обслуживания" \
-            "check"     "Диагностика" \
-            "update"    "Обновить OS-Agent и HA" \
-            "status"    "Мониторинг (live)" \
-            "reinstall" "Переустановить (сброс + новая установка)" \
-            "exit"      "Выйти" \
-            3>&1 1>&2 2>&3) || return 0  # ESC → показать меню
-
-        case "$action" in
-            menu)
-                return 0 ;;  # покажет show_main_menu
-            check)
-                CHECK_ONLY=true; return 2 ;;
-            update)
-                DO_UPDATE=true; return 2 ;;
-            status)
-                SHOW_STATUS=true; return 2 ;;
-            reinstall)
-                # Двойное подтверждение
-                if whiptail --title "Переустановка" --yesno \
-                    "ВНИМАНИЕ!\n\nПереустановка сбросит состояние установщика.\nДанные HA останутся до шага установки.\n\nСоздать бэкап перед переустановкой?" 14 55; then
-                    if [ -x /usr/local/bin/ha-backup ]; then
-                        msg_action "Создание бэкапа..."
-                        /usr/local/bin/ha-backup 2>/dev/null && msg_ok "Бэкап создан" || msg_warn "Бэкап не удался"
-                    else
-                        msg_warn "ha-backup не установлен, пропуск"
-                    fi
-                fi
-                if whiptail --title "Подтверждение" --yesno "Начать переустановку?" 8 40; then
-                    reset_state
-                    return 1  # продолжить к wizard
-                fi
-                return 0 ;;  # отменил → меню
-            exit)
-                exit 0 ;;
-        esac
-    else
-        # Текстовый режим
-        echo ""
-        msg_warn "Home Assistant уже установлен и работает!"
-        msg_info "Доступен: http://${ip:-localhost}:8123"
-        echo ""
-        msg_info "Действия:"
-        msg_dim "  sudo ha-install --check       Диагностика"
-        msg_dim "  sudo ha-install --update      Обновление"
-        msg_dim "  sudo ha-install --status      Мониторинг"
-        msg_dim "  sudo ha-install --uninstall   Удаление"
-        echo ""
-
-        local action
-        action=$(text_menu "Действие" "Выберите:" \
-            "menu"      "Меню обслуживания" \
-            "reinstall" "Переустановить" \
-            "exit"      "Выйти") || return 0
-
-        case "$action" in
-            menu)
-                return 0 ;;
-            reinstall)
-                echo ""
-                if _confirm_reinstall; then
-                    reset_state
-                    return 1
-                fi
-                return 0 ;;
-            exit)
-                exit 0 ;;
-        esac
-    fi
-
-    return 0
-}
-
-# Подтверждение переустановки (текстовый режим)
-_confirm_reinstall() {
-    msg_warn "Переустановка сбросит состояние установщика."
-    if [ -x /usr/local/bin/ha-backup ]; then
-        echo -en " ${WARN} Создать бэкап перед переустановкой? (y/д): " >&2
-        local a; read -r a
-        case "$a" in
-            y|Y|д|Д|yes|да) 
-                msg_action "Создание бэкапа..."
-                /usr/local/bin/ha-backup 2>/dev/null && msg_ok "Бэкап создан" || msg_warn "Бэкап не удался"
-                ;;
-        esac
-    fi
-    echo -en " ${WARN} Начать переустановку? Введите 'ПЕРЕУСТАНОВИТЬ': " >&2
-    local ans; read -r ans
-    [ "$ans" = "ПЕРЕУСТАНОВИТЬ" ]
-}
-
 # ============================================================================
 # MAIN MENU
 # ============================================================================
@@ -4708,18 +4601,32 @@ parse_args() {
 # БАННЕР
 # ============================================================================
 show_banner() {
-  if [ "$CHECK_ONLY" != true ] && [ "$UNINSTALL" != true ] && [ "$SHOW_STATUS" != true ]; then
-    [ "$LOGGING_ACTIVE" != true ] && clear
-  fi
-  [ "$SILENT" != true ] && {
-    echo -e "${BLUE}  _   _                         _            _     _              _   ${NC}"
-    echo -e "${BLUE} | | | | ___  _ __ ___   ___   / \\   ___ ___(_)___| |_ __ _ _ __ | |_ ${NC}"
-    echo -e "${BLUE} | |_| |/ _ \\| '_ \` _ \\ / _ \\ / _ \\ / __/ __| / __| __/ _\` | '_ \\| __|${NC}"
-    echo -e "${BLUE} |  _  | (_) | | | | | |  __// ___ \\\\__ \\__ \\ \\__ \\ || (_| | | | | |_ ${NC}"
-    echo -e "${BLUE} |_| |_|\\___/|_| |_| |_|\\___/_/   \\_\\___/___/_|___/\\__\\__,_|_| |_|\\__|${NC}"
-    echo -e "${WHITE}${BOLD}     ULTIMATE INSTALLER v${SCRIPT_VERSION}${NC}"
-    separator
-  }
+    if [ "$CHECK_ONLY" != true ] && [ "$UNINSTALL" != true ] && [ "$SHOW_STATUS" != true ]; then
+        [ "$LOGGING_ACTIVE" != true ] && clear
+    fi
+    [ "$SILENT" != true ] && {
+        echo -e "${BLUE} _ _ _ _ _ _ ${NC}"
+        echo -e "${BLUE} | | | | ___ _ __ ___ ___ / \\ ___ ___(_)___| |_ __ _ _ __ | |_ ${NC}"
+        echo -e "${BLUE} | |_| |/ _ \\| '_ \` _ \\ / _ \\ / _ \\ / __/ __| / __| __/ _\` | '_ \\| __|${NC}"
+        echo -e "${BLUE} | _ | (_) | | | | | | __// ___ \\\\__ \\__ \\ \\__ \\ || (_| | | | | |_ ${NC}"
+        echo -e "${BLUE} |_| |_|\\___/|_| |_| |_|\\___/_/ \\_\\___/___/_|___/\\__\\__,_|_| |_|\\__|${NC}"
+        echo -e "${WHITE}${BOLD} ULTIMATE INSTALLER v${SCRIPT_VERSION}${NC}"
+
+        # Статус HA если установлен
+        if systemctl is-active --quiet hassio-supervisor 2>/dev/null; then
+            local ip
+            ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+            local hc
+            hc=$(curl -s -o /dev/null -w "%{http_code}" -m 2 http://localhost:8123 2>/dev/null || echo 000)
+            if [ "$hc" = "200" ] || [ "$hc" = "401" ]; then
+                echo -e " ${GREEN}● HA работает: http://${ip:-localhost}:8123${NC}"
+            else
+                echo -e " ${YELLOW}● HA установлен (загружается...)${NC}"
+            fi
+        fi
+
+        separator
+    }
 }
 
 # ============================================================================
@@ -4832,19 +4739,8 @@ main() {
 
   # Интерактивный режим: цикл меню → wizard → меню
   if [ $# -eq 0 ] && [ "$RUN_WIZARD" = true ]; then
-        local install_checked=false
         while true; do
             if [ -t 0 ] && [ -t 1 ]; then
-                if [ "$install_checked" = false ]; then
-                    install_checked=true
-                    check_existing_installation
-                    local ci_rc=$?
-                    if [ $ci_rc -eq 2 ]; then
-                        [ "$CHECK_ONLY" = true ]   && { show_banner; do_check; exit 0; }
-                        [ "$SHOW_STATUS" = true ]  && { do_status; exit 0; }
-                        [ "$DO_UPDATE" = true ]    && { show_banner; acquire_lock; do_update; exit 0; }
-                    fi
-                fi
                 show_main_menu || exit 0
             fi
 
