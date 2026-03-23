@@ -4232,55 +4232,162 @@ Docker и сеть останутся.\n\
             fi
         done
 
-        # --- Сеть: вернуть ifupdown ---
+        # --- Сеть: восстановление ---
         msg_action "Восстановление сети..."
 
+        local iface=""
+        iface=$(ip -o link show 2>/dev/null | awk -F': ' '!/lo/{print $2; exit}' | cut -d'@' -f1)
+
+        # Определить что использовалось до установки
+        local use_nm=false
+        local use_ifupdown=false
+
         if [ -f "${BACKUP_DIR}/interfaces.bak" ]; then
+            # Был ifupdown — есть бэкап interfaces
+            if grep -qE "^auto|^iface|^allow-" "${BACKUP_DIR}/interfaces.bak" 2>/dev/null; then
+                # Бэкап содержит реальные интерфейсы (не только lo)
+                local real_ifaces
+                real_ifaces=$(grep -cE "^auto [^l]|^iface [^l]" "${BACKUP_DIR}/interfaces.bak" 2>/dev/null || echo 0)
+                if [ "$real_ifaces" -gt 0 ]; then
+                    use_ifupdown=true
+                fi
+            fi
+        fi
+
+        # На TV-box/Armbian обычно лучше оставить NetworkManager
+        if is_armbian || [ "$use_ifupdown" != true ]; then
+            use_nm=true
+        fi
+
+        if [ "$use_nm" = true ]; then
+            # --- Вариант 1: Оставить NetworkManager ---
+            msg_dim "Оставляем NetworkManager (стандарт для TV-box)"
+
+            # Убрать наши конфиги NM, но не отключать его
+            rm -f /etc/NetworkManager/conf.d/10-ha-managed.conf 2>/dev/null
+            rm -f /etc/NetworkManager/conf.d/10-dns-resolved.conf 2>/dev/null
+
+            # Восстановить resolv.conf
+            if [ -f "${BACKUP_DIR}/resolv.conf.bak" ]; then
+                rm -f /etc/resolv.conf 2>/dev/null
+                cp "${BACKUP_DIR}/resolv.conf.bak" /etc/resolv.conf 2>/dev/null
+                msg_ok "resolv.conf восстановлен из бэкапа"
+            fi
+
+            # Убедиться что NM работает
+            systemctl enable NetworkManager 2>/dev/null || true
+            systemctl restart NetworkManager 2>/dev/null || true
+
+            # Если systemd-resolved использовался — оставить
+            if systemctl is-enabled --quiet systemd-resolved 2>/dev/null; then
+                systemctl restart systemd-resolved 2>/dev/null || true
+            fi
+
+            # Дождаться IP
+            local net_wait=0
+            while [ $net_wait -lt 20 ]; do
+                local check_ip=""
+                check_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+                if [ -n "$check_ip" ]; then
+                    msg_ok "Сеть: ${check_ip} (NetworkManager)"
+                    break
+                fi
+                sleep 3; net_wait=$((net_wait + 3))
+            done
+
+            if [ $net_wait -ge 20 ]; then
+                # NM не дал IP — попробовать DHCP напрямую
+                msg_warn "NM не дал IP, пробуем DHCP..."
+                if [ -n "$iface" ]; then
+                    ip link set "$iface" up 2>/dev/null || true
+                    if command -v dhclient &>/dev/null; then
+                        dhclient "$iface" 2>/dev/null || true
+                    elif command -v udhcpc &>/dev/null; then
+                        udhcpc -i "$iface" -q 2>/dev/null || true
+                    fi
+                    sleep 5
+                    local check_ip=""
+                    check_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+                    [ -n "$check_ip" ] && msg_ok "Сеть: ${check_ip} (DHCP)" || msg_warn "Нет IP"
+                fi
+            fi
+
+            msg_ok "Сеть: NetworkManager"
+
+        else
+            # --- Вариант 2: Вернуть ifupdown (был до установки) ---
+            msg_dim "Восстановление ifupdown из бэкапа"
+
+            # Восстановить interfaces из бэкапа
             cp "${BACKUP_DIR}/interfaces.bak" /etc/network/interfaces 2>/dev/null
             msg_ok "interfaces восстановлен из бэкапа"
-        else
-            local iface=""
-            iface=$(ip -o link show 2>/dev/null | awk -F': ' '!/lo/{print $2; exit}')
-            cat > /etc/network/interfaces << IFEOF
-source /etc/network/interfaces.d/*
-auto lo
-iface lo inet loopback
 
-auto ${iface:-eth0}
-iface ${iface:-eth0} inet dhcp
-IFEOF
-            msg_ok "interfaces создан (DHCP на ${iface:-eth0})"
+            # Восстановить resolv.conf
+            if [ -f "${BACKUP_DIR}/resolv.conf.bak" ]; then
+                rm -f /etc/resolv.conf 2>/dev/null
+                cp "${BACKUP_DIR}/resolv.conf.bak" /etc/resolv.conf 2>/dev/null
+                msg_ok "resolv.conf восстановлен"
+            else
+                rm -f /etc/resolv.conf 2>/dev/null
+                echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
+                msg_ok "resolv.conf создан (8.8.8.8, 1.1.1.1)"
+            fi
+
+            # Переключить на ifupdown
+            systemctl stop NetworkManager 2>/dev/null || true
+            systemctl disable NetworkManager 2>/dev/null || true
+            systemctl stop systemd-resolved 2>/dev/null || true
+            systemctl disable systemd-resolved 2>/dev/null || true
+            systemctl enable networking 2>/dev/null || true
+            systemctl restart networking 2>/dev/null || true
+
+            # Поднять интерфейс
+            if [ -n "$iface" ] && command -v ifup &>/dev/null; then
+                ifdown "$iface" 2>/dev/null || true
+                ifup "$iface" 2>/dev/null || true
+            fi
+
+            # Дождаться IP
+            local net_wait=0
+            while [ $net_wait -lt 20 ]; do
+                local check_ip=""
+                check_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+                if [ -n "$check_ip" ]; then
+                    msg_ok "Сеть: ${check_ip} (ifupdown)"
+                    break
+                fi
+                sleep 3; net_wait=$((net_wait + 3))
+            done
+
+            if [ $net_wait -ge 20 ]; then
+                # ifupdown не дал IP — попробовать DHCP
+                msg_warn "ifupdown не дал IP, пробуем DHCP..."
+                if [ -n "$iface" ]; then
+                    ip link set "$iface" up 2>/dev/null || true
+                    if command -v dhclient &>/dev/null; then
+                        dhclient "$iface" 2>/dev/null || true
+                    elif command -v udhcpc &>/dev/null; then
+                        udhcpc -i "$iface" -q 2>/dev/null || true
+                    fi
+                    sleep 5
+                    local check_ip=""
+                    check_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+                    [ -n "$check_ip" ] && msg_ok "Сеть: ${check_ip} (DHCP)" || msg_warn "Нет IP"
+                fi
+            fi
+
+            msg_ok "Сеть: ifupdown"
         fi
 
-        if [ -f "${BACKUP_DIR}/resolv.conf.bak" ]; then
-            rm -f /etc/resolv.conf 2>/dev/null
-            cp "${BACKUP_DIR}/resolv.conf.bak" /etc/resolv.conf 2>/dev/null
-            msg_ok "resolv.conf восстановлен"
-        else
-            rm -f /etc/resolv.conf 2>/dev/null
-            echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
-            msg_ok "resolv.conf создан (8.8.8.8, 1.1.1.1)"
-        fi
-
-        systemctl stop NetworkManager 2>/dev/null || true
-        systemctl disable NetworkManager 2>/dev/null || true
-        systemctl stop systemd-resolved 2>/dev/null || true
-        systemctl disable systemd-resolved 2>/dev/null || true
-        systemctl enable networking 2>/dev/null || true
-        systemctl restart networking 2>/dev/null || true
-        msg_ok "Сеть: ifupdown"
-
-        local net_wait=0
-        while [ $net_wait -lt 15 ]; do
-            local check_ip=""
-            check_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-            [ -n "$check_ip" ] && { msg_ok "Сеть работает: ${check_ip}"; break; }
-            sleep 3; net_wait=$((net_wait + 3))
-        done
-        if [ $net_wait -ge 15 ]; then
-            msg_warn "Сеть может не работать. После перезагрузки проверьте:"
-            msg_dim "  sudo systemctl restart networking"
-            msg_dim "  sudo ifup ${iface:-eth0}"
+        # Финальная проверка
+        local final_ip=""
+        final_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+        if [ -z "$final_ip" ]; then
+            msg_error "Сеть не работает!"
+            msg_warn "После перезагрузки попробуйте:"
+            msg_dim "  sudo systemctl restart NetworkManager"
+            msg_dim "  sudo dhclient ${iface:-eth0}"
+            msg_dim "  sudo nmcli dev wifi list  (для WiFi)"
         fi
 
         # --- UFW: полный сброс ---
