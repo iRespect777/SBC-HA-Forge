@@ -3249,7 +3249,7 @@ step_hacs() {
   # Ожидание /config/configuration.yaml (до 10 минут)
   msg_action "Ожидание инициализации HA..."
   local iw=0
-  while ! docker exec homeassistant test -f /config/configuration.yaml 2>/dev/null; do
+  while ! docker exec homeassistant ls /config/configuration.yaml &>/dev/null; do
     sleep 10; iw=$((iw+10))
     [ $((iw%60)) -eq 0 ] && msg_dim "Ожидание /config/... ${iw}с"
     [ $iw -gt 600 ] && {
@@ -3330,7 +3330,7 @@ step_hacs() {
   fi
 
   # Результат
-  if [ "$hacs_ok" = true ] && docker exec homeassistant test -d /config/custom_components/hacs 2>/dev/null; then
+  if [ "$hacs_ok" = true ] && docker exec homeassistant ls /config/custom_components/hacs &>/dev/null; then
     docker restart homeassistant >/dev/null 2>&1
     msg_ok "HACS установлен!"
     separator
