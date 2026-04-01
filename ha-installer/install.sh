@@ -2668,7 +2668,7 @@ step_install_docker() {
   done
 
   setup_data_dir
-  prefetch_docker_images
+  # prefetch убран — supervisor сам загрузит образы в step_install_ha
   mark_done "$sid"
 }
 
@@ -2779,7 +2779,6 @@ step_install_ha() {
     backup_os_release
   fi
 
-  wait_prefetch
   msg_action "Установка HA (5-15 мин)..."
   msg_dim "Машина: ${HA_MACHINE}"
   export MACHINE="$HA_MACHINE"
@@ -2818,6 +2817,100 @@ DROPIN
     [ $((sw%15)) -eq 0 ] && msg_dim "${sw}с..."
   done
   [ $sw -lt 120 ] && msg_ok "hassio-supervisor активен"
+
+  # Ожидание загрузки всех контейнеров
+    msg_action "Ожидание загрузки контейнеров (5-20 мин)..."
+    local expected="hassio_dns hassio_cli hassio_audio hassio_multicast hassio_observer"
+    local max_wait=900
+    local elapsed=0
+    local all_ok=false
+
+    while [ $elapsed -lt $max_wait ]; do
+        local running=0
+        local total=0
+        local missing=""
+
+        for c in $expected; do
+            total=$((total + 1))
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${c}$"; then
+                running=$((running + 1))
+            else
+                missing="${missing} ${c}"
+            fi
+        done
+
+        # homeassistant отдельно (появляется последним)
+        total=$((total + 1))
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^homeassistant$'; then
+            running=$((running + 1))
+        else
+            missing="${missing} homeassistant"
+        fi
+
+        if [ $running -eq $total ]; then
+            all_ok=true
+            break
+        fi
+
+        progress_bar $elapsed $max_wait "Контейнеры: ${running}/${total}"
+        sleep 15
+        elapsed=$((elapsed + 15))
+
+        # Каждые 3 минуты показать что отсутствует
+        if [ $((elapsed % 180)) -eq 0 ] && [ -n "$missing" ]; then
+            progress_clear
+            msg_dim "Ожидание:${missing} (${elapsed}с)"
+        fi
+
+        # Проверить что supervisor жив
+        if [ $((elapsed % 120)) -eq 0 ]; then
+            if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^hassio_supervisor$'; then
+                msg_warn "Supervisor остановился, перезапуск..."
+                systemctl restart hassio-supervisor 2>/dev/null || true
+                sleep 15
+            fi
+        fi
+    done
+
+    progress_clear
+
+    if [ "$all_ok" = true ]; then
+        msg_ok "Все контейнеры запущены (${elapsed}с)"
+    else
+        # Показать результат
+        local running_list=""
+        local missing_list=""
+        for c in $expected homeassistant; do
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${c}$"; then
+                running_list="${running_list} ${c}"
+            else
+                missing_list="${missing_list} ${c}"
+            fi
+        done
+
+        [ -n "$running_list" ] && msg_ok "Запущены:${running_list}"
+
+        if [ -n "$missing_list" ]; then
+            msg_warn "Не запустились:${missing_list}"
+            msg_action "Перезапуск supervisor..."
+            systemctl restart hassio-supervisor 2>/dev/null || true
+            sleep 30
+
+            # Повторная проверка
+            local still_missing=""
+            for c in $expected homeassistant; do
+                docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${c}$" || still_missing="${still_missing} ${c}"
+            done
+
+            if [ -z "$still_missing" ]; then
+                msg_ok "После перезапуска все контейнеры запущены"
+            else
+                msg_warn "Не загрузились:${still_missing}"
+                msg_dim "Supervisor продолжит загрузку в фоне"
+                msg_dim "Проверить позже: docker ps"
+            fi
+        fi
+    fi
 
   touch "$GRACE_MARKER"
   save_config
