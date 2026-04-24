@@ -125,7 +125,16 @@ declare -A PROFILES=(
 header() {
   local t="$1"
   local b="================================================================"
-  local p=$(( 60 - ${#t} )); [ "$p" -lt 0 ] && p=0
+
+  # ${#t} считает байты, а не символы отображения.
+  # Кириллица в UTF-8: 2 байта на символ, но занимает 1 колонку.
+  # wc -m считает реальные символы Unicode.
+  local char_count
+  char_count=$(printf '%s' "$t" | wc -m 2>/dev/null || echo "${#t}")
+
+  local p=$(( 60 - char_count ))
+  [ "$p" -lt 0 ] && p=0
+
   echo -e "\n${BLUE}+${b}+${NC}"
   echo -e "${BLUE}|${WHITE}${BOLD} ${t}$(printf '%*s' "$p" '')${NC}${BLUE}|${NC}"
   echo -e "${BLUE}+${b}+${NC}\n"
@@ -722,6 +731,37 @@ estimate_install_time() {
 # =========================================================================
 # SAFE SCRIPT PATH
 # =========================================================================
+ensure_safe_script_path() {
+  # Копирует скрипт в постоянное место, если его там нет
+  # или если он отличается от текущего (например запущен из /tmp)
+  local src
+  src=$(readlink -f "$0" 2>/dev/null || echo "$0")
+
+  # Если скрипт уже запущен из SAFE_SCRIPT_PATH — ничего не делаем
+  if [ "$src" = "$SAFE_SCRIPT_PATH" ]; then
+    return 0
+  fi
+
+  # Проверяем что исходный файл существует и читаем
+  if [ ! -f "$src" ]; then
+    msg_warn "ensure_safe_script_path: исходный файл не найден: ${src}"
+    return 1
+  fi
+
+  # Копируем только если файлы отличаются
+  if ! cmp -s "$src" "$SAFE_SCRIPT_PATH" 2>/dev/null; then
+    mkdir -p "$(dirname "$SAFE_SCRIPT_PATH")"
+    cp "$src" "$SAFE_SCRIPT_PATH" 2>/dev/null || {
+      msg_warn "Не удалось скопировать скрипт в ${SAFE_SCRIPT_PATH}"
+      return 1
+    }
+    chmod +x "$SAFE_SCRIPT_PATH"
+    msg_dim "Скрипт сохранён: ${SAFE_SCRIPT_PATH}"
+  fi
+
+  return 0
+}
+
 setup_reboot_continue() {
     local continue_from="${1:-apparmor}"
     ensure_safe_script_path
@@ -1683,6 +1723,7 @@ _wizard_select_components() {
 # ============================================================================
 run_wizard() {
   local HAS_WHIPTAIL=false
+  local prof=""
   command -v whiptail &>/dev/null && HAS_WHIPTAIL=true
   [ "$HAS_WHIPTAIL" = false ] && {
     apt-get update -qq 2>/dev/null && apt-get install -y whiptail -qq 2>/dev/null && HAS_WHIPTAIL=true
@@ -2426,8 +2467,13 @@ step_configure_network() {
   }
 
   if who 2>/dev/null | grep -q pts; then
-    msg_warn "SSH-сессия! Переключение сети через 15с..."
-    sleep 15
+    msg_warn "SSH-сессия! Переключение сети..."
+    if [ "$SILENT" = true ] || [ "$DRY_RUN" = true ]; then
+      msg_dim "Silent/dry-run: пауза пропущена"
+    else
+      msg_dim "Пауза 15с для завершения активных SSH операций..."
+      sleep 15
+    fi
   fi
 
   systemctl list-unit-files networking.service &>/dev/null && \
@@ -3563,25 +3609,48 @@ step_hacs() {
   # Способ 1: wget внутри контейнера
   if [ "$hacs_ok" = false ] && docker exec homeassistant which wget &>/dev/null; then
     msg_dim "Способ 1: wget..."
-    docker exec homeassistant bash -c "wget -q -O- https://get.hacs.xyz | bash -" &>/dev/null &
-    local hp=$! hw=0
+    # Запускаем docker exec в фоне
+    docker exec homeassistant bash -c \
+      "wget -q -O- https://get.hacs.xyz | bash -" \
+      >/dev/null 2>&1 &
+    local hp=$!
+    local hw=0
     while kill -0 "$hp" 2>/dev/null; do
       sleep 5; hw=$((hw+5))
-      [ $hw -ge 180 ] && { kill "$hp" 2>/dev/null; break; }
+      if [ $hw -ge 180 ]; then
+        # kill убивает только docker exec на хосте.
+        # Дополнительно останавливаем процесс внутри контейнера.
+        kill "$hp" 2>/dev/null || true
+        # Убиваем wget/bash внутри контейнера по имени
+        docker exec homeassistant \
+          bash -c "pkill -f 'get.hacs.xyz' 2>/dev/null; pkill wget 2>/dev/null" \
+          2>/dev/null || true
+        break
+      fi
     done
-    wait "$hp" 2>/dev/null && hacs_ok=true
+    wait "$hp" 2>/dev/null && hacs_ok=true || true
   fi
 
   # Способ 2: curl внутри контейнера
   if [ "$hacs_ok" = false ] && docker exec homeassistant which curl &>/dev/null; then
     msg_dim "Способ 2: curl..."
-    docker exec homeassistant bash -c "curl -fsSL https://get.hacs.xyz | bash -" &>/dev/null &
-    local hp=$! hw=0
+    docker exec homeassistant bash -c \
+      "curl -fsSL https://get.hacs.xyz | bash -" \
+      >/dev/null 2>&1 &
+    local hp=$!
+    local hw=0
     while kill -0 "$hp" 2>/dev/null; do
       sleep 5; hw=$((hw+5))
-      [ $hw -ge 180 ] && { kill "$hp" 2>/dev/null; break; }
+      if [ $hw -ge 180 ]; then
+        kill "$hp" 2>/dev/null || true
+        # Убиваем curl/bash внутри контейнера
+        docker exec homeassistant \
+          bash -c "pkill -f 'get.hacs.xyz' 2>/dev/null; pkill curl 2>/dev/null" \
+          2>/dev/null || true
+        break
+      fi
     done
-    wait "$hp" 2>/dev/null && hacs_ok=true
+    wait "$hp" 2>/dev/null && hacs_ok=true || true
   fi
 
   # Способ 3: скачать на хост и скопировать
@@ -4007,24 +4076,59 @@ do_rescue() {
 # ОПЕРАЦИИ: МОНИТОРИНГ (live)
 # ============================================================================
 do_status() {
+  # Кэшируем тяжёлые данные — обновляем раз в 30с
+  # Лёгкие данные (температура, RAM) — каждые 5с
+  local ip hc=""
+  local cache_tick=0
+  local cache_interval=6  # каждые 6 итераций по 5с = 30с
+
+  # Первичное получение тяжёлых данных
+  ip=$(hostname -I 2>/dev/null | awk '{print $1}') || ip="?"
+  hc=$(curl -s -o /dev/null -w "%{http_code}" -m 3 http://localhost:8123 2>/dev/null || echo 000)
+
   while true; do
-    clear; show_banner
-    local ip t
-    ip=$(hostname -I 2>/dev/null | awk '{print $1}') || ip="?"
+    clear
+
+    # Тяжёлые данные — обновляем раз в 30с
+    if [ $cache_tick -eq 0 ]; then
+      ip=$(hostname -I 2>/dev/null | awk '{print $1}') || ip="?"
+      hc=$(curl -s -o /dev/null -w "%{http_code}" -m 3 http://localhost:8123 2>/dev/null || echo 000)
+    fi
+    cache_tick=$(( (cache_tick + 1) % cache_interval ))
+
+    # Шапка (без show_banner — он делает curl и clear)
+    echo -e "${BLUE}+================================================================+${NC}"
+    echo -e "${BLUE}|${WHITE}${BOLD} HA Установщик v${SCRIPT_VERSION} — Мониторинг${NC}${BLUE}|${NC}"
+    echo -e "${BLUE}+================================================================+${NC}"
+
+    # Лёгкие данные — каждый раз
+    local t
     t=$(get_cpu_temp)
-    echo -e "   ${BOLD}IP:${NC} $ip  ${BOLD}CPU:${NC} ${t:-?}C  ${BOLD}Работает:${NC} $(uptime -p 2>/dev/null || echo ?)"
+    echo -e "   ${BOLD}IP:${NC} ${ip}  ${BOLD}CPU:${NC} ${t:-?}C  ${BOLD}Работает:${NC} $(uptime -p 2>/dev/null || echo ?)"
     echo -e "   ${BOLD}RAM:${NC} $(free -h | awk '/Mem:/{printf "%s/%s",$3,$2}')  ${BOLD}Swap:${NC} $(free -h | awk '/Swap:/{printf "%s/%s",$3,$2}')"
+
     separator
-    docker ps --format ' {{.Names}}|{{.Status}}' 2>/dev/null | while IFS='|' read -r n s; do
-      echo "$s" | grep -q Up \
+
+    # Контейнеры Docker
+    docker ps --format '{{.Names}}|{{.Status}}' 2>/dev/null \
+    | while IFS='|' read -r n s; do
+      echo "$s" | grep -q "^Up" \
         && echo -e "   ${CHECK} ${n} ${DIM}${s}${NC}" \
         || echo -e "   ${CROSS} ${n} ${RED}${s}${NC}"
     done
-    local hc
-    hc=$(curl -s -o /dev/null -w "%{http_code}" -m 3 http://localhost:8123 2>/dev/null || echo 000)
+
     separator
-    [ "$hc" != "000" ] && echo -e "   ${CHECK} HA: ${GREEN}${hc}${NC}" || echo -e "   ${CROSS} HA: ${RED}недоступен${NC}"
-    echo -e "   ${DIM}Обновление каждые 5с. Ctrl+C для выхода${NC}"
+
+    # Статус HA (из кэша)
+    if [ "$hc" = "200" ] || [ "$hc" = "401" ]; then
+      echo -e "   ${CHECK} HA: ${GREEN}OK (${hc})${NC}  http://${ip}:8123"
+    elif [ "$hc" = "000" ]; then
+      echo -e "   ${CROSS} HA: ${RED}недоступен${NC}"
+    else
+      echo -e "   ${WARN}  HA: ${YELLOW}${hc}${NC}"
+    fi
+
+    echo -e "   ${DIM}$(date '+%H:%M:%S') | Ctrl+C для выхода | обновление каждые 5с${NC}"
     sleep 5
   done
 }
@@ -4148,8 +4252,9 @@ Docker и сеть останутся.\n\
         docker volume ls --format '{{.Name}}' 2>/dev/null | grep -iE "hassio|homeassistant|home.assistant" | while IFS= read -r v; do
             docker volume rm -f "$v" 2>/dev/null
         done
+        # local нельзя использовать внутри while-pipe, объявляем mp заранее
+        local mp=""
         docker volume ls -f dangling=true --format '{{.Name}}' 2>/dev/null | while IFS= read -r v; do
-            local mp=""
             mp=$(docker volume inspect "$v" --format '{{.Mountpoint}}' 2>/dev/null)
             if [ -n "$mp" ] && [ -d "$mp" ] && ls "$mp" 2>/dev/null | grep -qiE "hassio|homeassistant|configuration.yaml"; then
                 docker volume rm -f "$v" 2>/dev/null
@@ -4783,14 +4888,71 @@ do_self_update() {
     [ "$ans" != "y" ] && [ "$ans" != "Y" ] && [ "$ans" != "д" ] && [ "$ans" != "Д" ] && return
   fi
 
-  local nf="${0}.new"
-  wget -q -O "$nf" "https://raw.githubusercontent.com/${INSTALLER_REPO}/main/install.sh" 2>/dev/null || { msg_error "Загрузка не удалась"; return; }
-  bash -n "$nf" 2>/dev/null || { msg_error "Синтаксическая ошибка"; rm -f "$nf"; return; }
-  grep -q "SCRIPT_VERSION=" "$nf" || { msg_error "Некорректный файл"; rm -f "$nf"; return; }
-  local sz; sz=$(wc -c < "$nf")
-  [ "$sz" -lt 10000 ] && { msg_error "Файл слишком мал (${sz}б)"; rm -f "$nf"; return; }
-  mv "$nf" "$0"; chmod +x "$0"
-  msg_ok "Обновлён до ${latest}. Перезапустите скрипт."
+  # Используем mktemp вместо "${0}.new" — безопасно если $0 это /tmp/... или read-only путь
+  local nf
+  nf=$(mktemp /tmp/ha_update_XXXXXX.sh 2>/dev/null) || {
+    msg_error "Не удалось создать временный файл"
+    return 1
+  }
+
+  wget -q -O "$nf" \
+    "https://raw.githubusercontent.com/${INSTALLER_REPO}/main/install.sh" \
+    2>/dev/null || {
+    msg_error "Загрузка не удалась"
+    rm -f "$nf"
+    return 1
+  }
+
+  # Проверяем синтаксис
+  bash -n "$nf" 2>/dev/null || {
+    msg_error "Синтаксическая ошибка в загруженном файле"
+    rm -f "$nf"
+    return 1
+  }
+
+  # Проверяем что это действительно наш скрипт
+  grep -q "SCRIPT_VERSION=" "$nf" || {
+    msg_error "Некорректный файл (нет SCRIPT_VERSION)"
+    rm -f "$nf"
+    return 1
+  }
+
+  # Проверяем минимальный размер (защита от пустых страниц 404)
+  local sz
+  sz=$(wc -c < "$nf")
+  if [ "${sz:-0}" -lt 10000 ]; then
+    msg_error "Файл слишком мал (${sz}б) — возможно ошибка загрузки"
+    rm -f "$nf"
+    return 1
+  fi
+
+  # Определяем куда сохранять:
+  # Приоритет 1: SAFE_SCRIPT_PATH (/usr/local/bin/ha-install)
+  # Приоритет 2: оригинальный путь $0 если он не /tmp
+  local target_path="$SAFE_SCRIPT_PATH"
+  local real0
+  real0=$(readlink -f "$0" 2>/dev/null || echo "$0")
+  if [ ! -w "$(dirname "$SAFE_SCRIPT_PATH")" ]; then
+    # Нет прав на /usr/local/bin — пишем рядом с $0
+    if [[ "$real0" != /tmp/* ]]; then
+      target_path="$real0"
+    else
+      msg_error "Нет подходящего пути для сохранения (запущен из /tmp)"
+      rm -f "$nf"
+      return 1
+    fi
+  fi
+
+  # Атомарная замена файла
+  chmod +x "$nf"
+  mv "$nf" "$target_path" || {
+    msg_error "Не удалось заменить файл: ${target_path}"
+    rm -f "$nf"
+    return 1
+  }
+
+  msg_ok "Обновлён до ${latest}: ${target_path}"
+  msg_info "Перезапустите скрипт: sudo bash ${target_path}"
 }
 
 # ============================================================================
@@ -5080,6 +5242,10 @@ main() {
   done
 
   [ "$EUID" -ne 0 ] && { echo "Требуется root! Используйте: sudo $0"; exit 1; }
+
+  # Сохранить оригинальные аргументы ДО parse_args
+  # Используется в setup_reboot_continue для продолжения после перезагрузки
+  ORIGINAL_ARGS="$*"
 
   parse_args "$@"
   setup_dirs
