@@ -477,8 +477,7 @@ _send_webhook() {
     # Discord ожидает JSON с полем "content"
     *discord.com/api/webhooks/*|*discordapp.com/api/webhooks/*)
       local escaped
-      escaped=$(printf '%s' "$full_msg" \
-        | sed 's/\\/\\\\/g; s/"/\\"/g')
+      escaped=$(printf '%s' "$full_msg" | jq -Rs .)
       curl -s -X POST "$url" \
         -H "Content-Type: application/json" \
         -d "{\"content\":\"${escaped}\"}" \
@@ -488,8 +487,7 @@ _send_webhook() {
     # Slack ожидает JSON с полем "text"
     *hooks.slack.com/*)
       local escaped
-      escaped=$(printf '%s' "$full_msg" \
-        | sed 's/\\/\\\\/g; s/"/\\"/g')
+      escaped=$(printf '%s' "$full_msg" | jq -Rs .)
       curl -s -X POST "$url" \
         -H "Content-Type: application/json" \
         -d "{\"text\":\"${escaped}\"}" \
@@ -499,8 +497,7 @@ _send_webhook() {
     # Gotify ожидает JSON с полями "title" и "message"
     */message*|*gotify*)
       local escaped
-      escaped=$(printf '%s' "$full_msg" \
-        | sed 's/\\/\\\\/g; s/"/\\"/g')
+      escaped=$(printf '%s' "$full_msg" | jq -Rs .)
       curl -s -X POST "$url" \
         -H "Content-Type: application/json" \
         -d "{\"title\":\"Home Assistant\",\"message\":\"${escaped}\",\"priority\":5}" \
@@ -519,8 +516,7 @@ _send_webhook() {
       rc="${rc:-000}"
       if [[ ! "$rc" =~ ^2 ]]; then
         local escaped
-        escaped=$(printf '%s' "$full_msg" \
-          | sed 's/\\/\\\\/g; s/"/\\"/g')
+      escaped=$(printf '%s' "$full_msg" | jq -Rs .)
         curl -s -X POST "$url" \
           -H "Content-Type: application/json" \
           -d "{\"text\":\"${escaped}\",\"message\":\"${escaped}\"}" \
@@ -1596,8 +1592,13 @@ setup_docker_mirror() {
       /etc/docker/daemon.json > /tmp/dj.tmp 2>/dev/null && \
       mv /tmp/dj.tmp /etc/docker/daemon.json
   else
-    echo "{\"log-driver\":\"journald\",\"storage-driver\":\"overlay2\",\"registry-mirrors\":[\"${OPT_DOCKER_MIRROR}\"]}" \
-      > /etc/docker/daemon.json
+    if [ -f /etc/docker/daemon.json ]; then
+      msg_warn "Невозможно безопасно добавить зеркало без jq."
+      msg_dim "Добавьте вручную в /etc/docker/daemon.json: \"registry-mirrors\": [\"${OPT_DOCKER_MIRROR}\"]"
+    else
+      echo "{\"log-driver\":\"journald\",\"storage-driver\":\"overlay2\",\"registry-mirrors\":[\"${OPT_DOCKER_MIRROR}\"]}" \
+        > /etc/docker/daemon.json
+    fi
   fi
   msg_ok "Зеркало Docker: ${OPT_DOCKER_MIRROR}"
 }
@@ -2367,7 +2368,7 @@ step_update_system() {
   header "[${CURRENT_STEP_NUM}/${TOTAL_STEPS}] ОБНОВЛЕНИЕ СИСТЕМЫ"
   setup_timezone
   setup_locale
-  setup_wifi
+  # setup_wifi перенесён в step_configure_network (требует запущенного NetworkManager)
   if [ "$SKIP_UPDATE" = false ]; then
     run_cmd_fatal "apt update" apt_safe update -y
     run_cmd "apt upgrade" apt_safe upgrade -y
@@ -2636,6 +2637,9 @@ step_configure_network() {
       return 1
     fi
   fi
+
+  # Настройка WiFi после того как NetworkManager гарантированно запущен
+  setup_wifi
 
   mark_done "$sid"
 }
@@ -3352,7 +3356,7 @@ if [ -n "$WEBHOOK" ]; then
         | sed 's/\\/\\\\/g; s/"/\\"/g')
       curl -s -X POST "$WEBHOOK" \
         -H "Content-Type: application/json" \
-        -d "{\"content\":\"${ESCAPED}\"}" \
+        -d "{\"content\":\${ESCAPED}\}" \
         >/dev/null 2>&1 || true
       ;;
 
@@ -3362,7 +3366,7 @@ if [ -n "$WEBHOOK" ]; then
         | sed 's/\\/\\\\/g; s/"/\\"/g')
       curl -s -X POST "$WEBHOOK" \
         -H "Content-Type: application/json" \
-        -d "{\"text\":\"${ESCAPED}\"}" \
+        -d "{\"text\":\${ESCAPED}\}" \
         >/dev/null 2>&1 || true
       ;;
 
@@ -3884,14 +3888,15 @@ step_post_restore() {
     [ $cw -gt 120 ] && break
   done
 
-  msg_action "Остановка HA..."
+  msg_action "Остановка HA и Supervisor..."
+  systemctl stop hassio-supervisor 2>/dev/null || true
   docker stop homeassistant 2>/dev/null || true
   sleep 3
 
   msg_action "Восстановление: $(basename "$OPT_RESTORE_BACKUP")..."
   if tar xzf "$OPT_RESTORE_BACKUP" -C "$HASSIO_DIR" 2>/dev/null; then
     msg_ok "Бэкап восстановлен"
-    docker start homeassistant 2>/dev/null
+    systemctl start hassio-supervisor 2>/dev/null
     send_notification "Восстановлено: $(basename "$OPT_RESTORE_BACKUP")"
   else
     msg_error "Восстановление не удалось"
@@ -4674,8 +4679,8 @@ Docker и сеть останутся.\n\
 
         # --- Очистка Docker ---
         if command -v docker &>/dev/null; then
-            msg_action "Очистка Docker..."
-            docker system prune -af 2>/dev/null || true
+            msg_action "Очистка Docker (только неиспользуемые данные HA)..."
+            docker system prune -f 2>/dev/null || true   # -f (без -a) чтобы не удалить образы Portainer/AdGuard и т.д.
             docker volume prune -f 2>/dev/null || true
         fi
 
