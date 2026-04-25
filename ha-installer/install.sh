@@ -2980,12 +2980,16 @@ step_download_packages() {
   download_file \
     "https://github.com/home-assistant/os-agent/releases/download/${RESOLVED_OA_VER}/os-agent_${RESOLVED_OA_VER}_linux_${CACHED_ARCH}.deb" \
     "${HA_TMP}/os-agent.deb" "OS-Agent" || { msg_error "Загрузка OS-Agent!"; exit 1; }
-  verify_checksum "${HA_TMP}/os-agent.deb" "home-assistant/os-agent" "$RESOLVED_OA_VER"
+  verify_checksum "${HA_TMP}/os-agent.deb" "home-assistant/os-agent" "$RESOLVED_OA_VER" || {
+    msg_error "Контрольная сумма OS-Agent не совпала! Файл поврежден."; exit 1;
+  }
 
   download_file \
     "https://github.com/home-assistant/supervised-installer/releases/download/${RESOLVED_HA_VER}/homeassistant-supervised.deb" \
     "${HA_TMP}/ha.deb" "HA Supervised" || { msg_error "Загрузка HA!"; exit 1; }
-  verify_checksum "${HA_TMP}/ha.deb" "home-assistant/supervised-installer" "$RESOLVED_HA_VER"
+  verify_checksum "${HA_TMP}/ha.deb" "home-assistant/supervised-installer" "$RESOLVED_HA_VER" || {
+    msg_error "Контрольная сумма HA не совпала! Файл поврежден."; exit 1;
+  }
 
   msg_ok "Загружены и проверены"
   mark_done "$sid"
