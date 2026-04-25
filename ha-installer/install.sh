@@ -2262,14 +2262,38 @@ show_main_menu() {
     status)    SHOW_STATUS=true; RUN_WIZARD=false;;
     update)    DO_UPDATE=true; RUN_WIZARD=false;;
     backup)
-      if [ -x /usr/local/bin/ha-backup ]; then /usr/local/bin/ha-backup; exit $?
-      else msg_error "ha-backup не установлен"; exit 1; fi;;
+      if [ -x /usr/local/bin/ha-backup ]; then
+        /usr/local/bin/ha-backup
+      else
+        msg_error "Утилита ha-backup не найдена"
+        msg_dim "Она устанавливается автоматически при выборе опции 'Бэкапы' в мастере установки"
+      fi
+      echo ""
+      read -p "Нажмите Enter для возврата в меню..." -r
+      return 0
+      ;;
     restore)
-      if [ -x /usr/local/bin/ha-restore ]; then /usr/local/bin/ha-restore; exit $?
-      else msg_error "ha-restore не установлен"; exit 1; fi;;
+      if [ -x /usr/local/bin/ha-restore ]; then
+        /usr/local/bin/ha-restore
+      else
+        msg_error "Утилита ha-restore не найдена"
+        msg_dim "Она устанавливается автоматически при выборе опции 'Бэкапы' в мастере установки"
+      fi
+      echo ""
+      read -p "Нажмите Enter для возврата в меню..." -r
+      return 0
+      ;;
     health)
-      if [ -x /usr/local/bin/ha-health ]; then /usr/local/bin/ha-health; exit $?
-      else msg_error "ha-health не установлен"; exit 1; fi;;
+      if [ -x /usr/local/bin/ha-health ]; then
+        /usr/local/bin/ha-health
+      else
+        msg_error "Утилита ha-health не найдена"
+        msg_dim "Установите HA, чтобы утилита создалась автоматически"
+      fi
+      echo ""
+      read -p "Нажмите Enter для возврата в меню..." -r
+      return 0
+      ;;
     rescue)     DO_RESCUE=true; RUN_WIZARD=false;;
     benchmark) DO_BENCHMARK=true; RUN_WIZARD=false;;
     export)    DO_EXPORT_CONFIG=true; RUN_WIZARD=false;;
@@ -3506,13 +3530,35 @@ S
 set -f
 BD="${HA_BACKUP_DIR}"; HD="${HASSIO_DIR}"; KD=30
 TS=\$(date +%Y%m%d_%H%M%S); mkdir -p "\$BD"
-[ ! -d "\${HD}/homeassistant" ] && exit 1
+
+# Проверка что HA установлен и запущен хотя бы раз (создана папка конфига)
+if [ ! -d "\${HD}/homeassistant" ]; then
+  echo "Ошибка: Каталог \${HD}/homeassistant не найден."
+  echo "Убедитесь, что Home Assistant установлен и запущен хотя бы один раз."
+  exit 1
+fi
+
 EX="--exclude=*.db --exclude=*.db-shm --exclude=*.db-wal --exclude=home-assistant_v2.db* --exclude=tts --exclude=deps --exclude=__pycache__"
-command -v pigz &>/dev/null \
-  && tar -I pigz -cf "\${BD}/ha_config_\${TS}.tar.gz" \$EX -C "\$HD" homeassistant 2>/dev/null \
-  || tar czf "\${BD}/ha_config_\${TS}.tar.gz" \$EX -C "\$HD" homeassistant 2>/dev/null
+
+# Создание архива
+if command -v pigz &>/dev/null; then
+  tar -I pigz -cf "\${BD}/ha_config_\${TS}.tar.gz" \$EX -C "\$HD" homeassistant
+else
+  tar czf "\${BD}/ha_config_\${TS}.tar.gz" \$EX -C "\$HD" homeassistant
+fi
+
+# Проверка успешности создания
+if [ \$? -ne 0 ]; then
+  echo "Ошибка при создании архива!"
+  exit 1
+fi
+
+# Удаление старых бэкапов
 find "\$BD" -name "ha_config_*.tar.gz" -mtime +\$KD -delete 2>/dev/null
+
+# Уведомление и вывод результата
 /usr/local/bin/ha-notify "Бэкап: \$(du -sh "\${BD}/ha_config_\${TS}.tar.gz" 2>/dev/null | awk '{print \$1}')"
+echo "Бэкап успешно создан: \${BD}/ha_config_\${TS}.tar.gz"
 BEOF
 
     cat > /usr/local/bin/ha-restore << 'REOF'
