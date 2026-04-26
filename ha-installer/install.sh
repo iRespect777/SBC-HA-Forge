@@ -3703,14 +3703,67 @@ REOF
   if [ "$OPT_REMOTE_BACKUP" = true ] && [ -n "$REMOTE_BACKUP_TARGET" ]; then
     cat > /usr/local/bin/ha-backup-remote << RBEOF
 #!/bin/bash
-BD="${HA_BACKUP_DIR}"; REMOTE="${REMOTE_BACKUP_TARGET}"
-LATEST=\$(ls -1t "\$BD"/ha_config_*.tar.gz 2>/dev/null | head -1)
-[ -z "\$LATEST" ] && exit 1
-case "\$REMOTE" in
-  ssh://*) scp -o StrictHostKeyChecking=no "\$LATEST" "\${REMOTE#ssh://}" 2>/dev/null \
-    && /usr/local/bin/ha-notify "Бэкап -> SSH OK" ;;
-  *) /usr/local/bin/ha-notify "Неизвестный протокол бэкапа" ;;
-esac
+REMOTE="${REMOTE_BACKUP_TARGET}"
+BD="${HA_BACKUP_DIR}"
+
+if command -v ha &>/dev/null; then
+  # ==========================================
+  # МЕТОД 1: Копирование полного снапшота (HA CLI)
+  # ==========================================
+  # ИСПРАВЛЕНО: Убран несуществующий флаг -j. JSON идет в stdout, таблица в stderr.
+  LATEST_SLUG=\$(ha backups list 2>/dev/null | jq -r '.data.backups | sort_by(.date) | reverse | .[0].slug' 2>/dev/null)
+  
+  if [ -z "\$LATEST_SLUG" ]; then
+    echo "Снапшоты не найдены"; exit 1
+  fi
+  
+  # Супервизор хранит снапшоты в /usr/share/hassio/backup/
+  # (Символическая ссылка с --data-dir обрабатывается автоматически)
+  SNAPSHOT_DIR="/usr/share/hassio/backup"
+  LATEST_FILE="\${SNAPSHOT_DIR}/\${LATEST_SLUG}.tar"
+  
+  if [ ! -f "\$LATEST_FILE" ]; then
+    echo "Файл снапшота не найден: \$LATEST_FILE"; exit 1
+  fi
+  
+  case "\$REMOTE" in
+    ssh://*) 
+      # Предпочитаем rsync для докачки больших файлов, если доступен. Иначе scp.
+      if command -v rsync &>/dev/null; then
+        rsync -avz --progress -e "ssh -o StrictHostKeyChecking=no" "\$LATEST_FILE" "\${REMOTE#ssh://}" \
+          && /usr/local/bin/ha-notify "Удал. бэкап (Снапшот rsync) -> OK" \
+          || /usr/local/bin/ha-notify "Удал. бэкап (Снапшот rsync) -> ОШИБКА"
+      else
+        scp -o StrictHostKeyChecking=no "\$LATEST_FILE" "\${REMOTE#ssh://}" \
+          && /usr/local/bin/ha-notify "Удал. бэкап (Снапшот scp) -> OK" \
+          || /usr/local/bin/ha-notify "Удал. бэкап (Снапшот scp) -> ОШИБКА"
+      fi
+      ;;
+    *) /usr/local/bin/ha-notify "Удал. бэкап: неизвестный протокол (\$REMOTE)" ;;
+  esac
+
+else
+  # ==========================================
+  # МЕТОД 2: Копирование TAR архива (Fallback)
+  # ==========================================
+  LATEST=\$(ls -1t "\$BD"/ha_config_*.tar.gz 2>/dev/null | head -1)
+  [ -z "\$LATEST" ] && { echo "Локальные TAR бэкапы не найдены"; exit 1; }
+  
+  case "\$REMOTE" in
+    ssh://*) 
+      if command -v rsync &>/dev/null; then
+        rsync -avz --progress -e "ssh -o StrictHostKeyChecking=no" "\$LATEST" "\${REMOTE#ssh://}" \
+          && /usr/local/bin/ha-notify "Удал. бэкап (TAR rsync) -> OK" \
+          || /usr/local/bin/ha-notify "Удал. бэкап (TAR rsync) -> ОШИБКА"
+      else
+        scp -o StrictHostKeyChecking=no "\$LATEST" "\${REMOTE#ssh://}" \
+          && /usr/local/bin/ha-notify "Удал. бэкап (TAR scp) -> OK" \
+          || /usr/local/bin/ha-notify "Удал. бэкап (TAR scp) -> ОШИБКА"
+      fi
+      ;;
+    *) /usr/local/bin/ha-notify "Удал. бэкап: неизвестный протокол (\$REMOTE)" ;;
+  esac
+fi
 RBEOF
     chmod +x /usr/local/bin/ha-backup-remote
     msg_ok "Удалённый бэкап"
