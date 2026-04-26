@@ -3541,134 +3541,155 @@ S
   chmod +x /usr/local/bin/ha-weekly-report
   msg_ok "Еженедельный отчёт"
 
-  # --- Бэкап ---
+    # --- Бэкап ---
   if [ "$OPT_BACKUP" = true ]; then
     mkdir -p "$HA_BACKUP_DIR"
     cat > /usr/local/bin/ha-backup << BEOF
 #!/bin/bash
 set -f
-BD="${HA_BACKUP_DIR}"; HD="${HASSIO_DIR}"; KD=30
+BD="${HA_BACKUP_DIR}"; KD=30
 TS=\$(date +%Y%m%d_%H%M%S); mkdir -p "\$BD"
 
-# Читаем API токен и УДАЛЯЕМ пробелы/переносы строк (защита от кривого копирования)
-HA_TOKEN=\$(cat /var/lib/ha-installer/secrets/ha_api_token 2>/dev/null | tr -d '[:space:]' || echo "")
-HA_URL="http://localhost:8123"
-
-if [ -n "\$HA_TOKEN" ]; then
+if command -v ha &>/dev/null; then
   # ==========================================
-  # МЕТОД 1: Полный снапшот через HA API
+  # МЕТОД 1: Полный снапшот через HA CLI (Надежный для Supervised)
   # ==========================================
-  if ! command -v jq &>/dev/null; then
-    echo "Ошибка: Для API бэкапа необходима утилита jq (apt install jq)."
-    /usr/local/bin/ha-notify "Бэкап API: ОШИБКА (jq не установлен)"
+  echo "Создание полного бэкапа через HA CLI..."
+  
+  # Утилита 'ha' сама ожидает завершения бэкапа и выводит прогресс
+  if ha backups new --full name="AutoBackup_\${TS}" 2>&1; then
+    echo "Полный бэкап успешно создан средствами HA!"
+    /usr/local/bin/ha-notify "Полный бэкап CLI завершен: AutoBackup_\${TS}"
+  else
+    echo "=========================================="
+    echo "ОШИБКА: Не удалось создать бэкап через HA CLI!"
+    echo "Проверьте логи: journalctl -u hassio-supervisor"
+    echo "=========================================="
+    /usr/local/bin/ha-notify "Бэкап CLI: ОШИБКА"
     exit 1
   fi
 
-  echo "Создание полного бэкапа через API Home Assistant..."
-  
-  RESPONSE=\$(curl -s -X POST "\${HA_URL}/api/hassio/backups/new/full" \
-    -H "Authorization: Bearer \$HA_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "{\\\"name\\\":\\\"AutoBackup_\${TS}\\\"}")
-    
-  SLUG=\$(echo "\$RESPONSE" | jq -r '.data.slug' 2>/dev/null)
-  
-  # Проверяем, что API принял запрос. Если токен неверный, SLUG будет "null" или пустым.
-  if [ -z "\$SLUG" ] || [ "\$SLUG" = "null" ]; then
-    echo "Ошибка запуска бэкапа через API (проверьте токен!). Ответ: \$(echo "\$RESPONSE" | head -c 200)"
-    /usr/local/bin/ha-notify "Бэкап API: ОШИБКА запуска"
-    exit 1
-  fi
-  
-  echo "Бэкап запущен (Slug: \${SLUG}). Ожидание завершения (может занять 10-30 мин)..."
-  /usr/local/bin/ha-notify "Бэкап API запущен (\${SLUG})"
-  
-  # Ожидание завершения (проверяем статус каждые 30 секунд, макс 45 минут)
-  ELAPSED=0
-  while [ \$ELAPSED -lt 2700 ]; do
-    STATUS_JSON=\$(curl -s "\${HA_URL}/api/hassio/backups/\${SLUG}" \
-      -H "Authorization: Bearer \$HA_TOKEN")
-    STATUS=\$(echo "\$STATUS_JSON" | jq -r '.data.status' 2>/dev/null)
-    
-    if [ "\$STATUS" = "completed" ]; then
-      SIZE=\$(echo "\$STATUS_JSON" | jq -r '.data.size' 2>/dev/null)
-      echo "Полный бэкап успешно создан! Slug: \${SLUG}, Размер: \${SIZE}МБ"
-      /usr/local/bin/ha-notify "Бэкап API завершен: \${SLUG} (\${SIZE}МБ)"
-      break
-    elif [ "\$STATUS" = "failed" ] || [ "\$STATUS" = "null" ]; then
-      echo "Ошибка создания бэкапа через API! Статус: \$STATUS"
-      /usr/local/bin/ha-notify "Бэкап API: ОШИБКА (\${SLUG})"
-      exit 1
-    fi
-    
-    sleep 30
-    ELAPSED=\$((ELAPSED + 30))
-    echo "Ожидание... (\$ELAPSED сек, статус: \$STATUS)"
-  done
-  
-  if [ \$ELAPSED -ge 2700 ]; then
-    echo "Таймаут ожидания бэкапа API."
-    /usr/local/bin/ha-notify "Бэкап API: Таймаут (\${SLUG})"
-    exit 1
-  fi
-
-  # Очистка старых бэкапов через API (оставляем последние 5 штук)
-  echo "Очистка старых снапшотов API (оставляем 5 последних)..."
-  SLUGS=\$(curl -s "\${HA_URL}/api/hassio/backups" \
-    -H "Authorization: Bearer \$HA_TOKEN" | \
-    jq -r '.data.backups | sort_by(.date) | .[].slug' 2>/dev/null)
-    
+  # Очистка старых бэкапов (через CLI оставляем 5 последних)
+  echo "Очистка старых снапшотов (оставляем 5 последних)..."
+  SLUGS=\$(ha backups list --raw-json 2>/dev/null | jq -r '.data.backups | sort_by(.date) | .[].slug' 2>/dev/null)
   COUNT=\$(echo "\$SLUGS" | wc -l)
   KEEP=5
   
   if [ "\$COUNT" -gt "\$KEEP" ]; then
     DELETE_COUNT=\$((COUNT - KEEP))
     echo "\$SLUGS" | head -n \$DELETE_COUNT | while read -r del_slug; do
-      curl -s -X POST "\${HA_URL}/api/hassio/backups/\${del_slug}/remove" \
-        -H "Authorization: Bearer \$HA_TOKEN" >/dev/null
+      ha backups remove "\$del_slug" >/dev/null 2>&1
       echo "Удален старый снапшот: \${del_slug}"
     done
   fi
 
 else
   # ==========================================
-  # МЕТОД 2: Быстрый бэкап папки конфига (TAR)
+  # МЕТОД 2: Быстрый бэкап папки конфига (TAR) - fallback
   # ==========================================
-  echo "API Token не найден. Используется быстрый бэкап (только конфиг Core)."
-  echo ""
-  echo "ВНИМАНИЕ: Этот бэкап НЕ включает аддоны (Zigbee2MQTT, ESPHome) и базы данных!"
-  echo "Для создания ПОЛНОГО бэкапа через API выполните 3 шага:"
-  echo "  1. Откройте HA: http://\$(hostname -I 2>/dev/null | awk '{print \$1}'):8123"
-  echo "  2. Перейдите: Настройки профиля -> Безопасность -> Токены доступа"
-  echo "  3. Создайте токен и сохраните его в систему командой:"
-  echo "     echo 'ВАШ_ТОКЕН' | sudo tee /var/lib/ha-installer/secrets/ha_api_token"
+  echo "Утилита 'ha' не найдена. Используется быстрый бэкап (только конфиг Core)."
   echo ""
   
-  if [ ! -d "\${HD}/homeassistant" ]; then
-    echo "Ошибка: Каталог \${HD}/homeassistant не найден."
-    echo "Убедитесь, что Home Assistant установлен и запущен хотя бы один раз."
+  # Динамически определяем реальный путь к конфигурации HA через Docker
+  CONFIG_DIR=\$(docker inspect homeassistant --format '{{range .Mounts}}{{if eq .Destination "/config"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+  if [ -z "\$CONFIG_DIR" ]; then
+      CONFIG_DIR="/usr/share/hassio/homeassistant"
+  fi
+  
+  if [ ! -d "\$CONFIG_DIR" ]; then
+    echo "=========================================="
+    echo "ОШИБКА: Каталог конфигурации HA не найден (\$CONFIG_DIR)."
+    echo "Убедитесь, что Home Assistant запущен."
+    echo "=========================================="
     exit 1
   fi
   
   EX="--exclude=*.db --exclude=*.db-shm --exclude=*.db-wal --exclude=home-assistant_v2.db* --exclude=tts --exclude=deps --exclude=__pycache__"
+  CONFIG_PARENT=\$(dirname "\$CONFIG_DIR")
+  CONFIG_NAME=\$(basename "\$CONFIG_DIR")
   
   if command -v pigz &>/dev/null; then
-    tar -I pigz -cf "\${BD}/ha_config_\${TS}.tar.gz" \$EX -C "\$HD" homeassistant
+    tar -I pigz -cf "\${BD}/ha_config_\${TS}.tar.gz" \$EX -C "\$CONFIG_PARENT" "\$CONFIG_NAME"
   else
-    tar czf "\${BD}/ha_config_\${TS}.tar.gz" \$EX -C "\$HD" homeassistant
+    tar czf "\${BD}/ha_config_\${TS}.tar.gz" \$EX -C "\$CONFIG_PARENT" "\$CONFIG_NAME"
   fi
   
   if [ \$? -ne 0 ]; then
-    echo "Ошибка при создании tar архива!"
+    echo "=========================================="
+    echo "ОШИБКА при создании tar архива!"
+    echo "=========================================="
     exit 1
   fi
   
   find "\$BD" -name "ha_config_*.tar.gz" -mtime +\$KD -delete 2>/dev/null
   BSIZE=\$(du -sh "\${BD}/ha_config_\${TS}.tar.gz" 2>/dev/null | awk '{print \$1}')
   /usr/local/bin/ha-notify "Бэкап TAR: \$BSIZE"
-  echo "Бэкап конфига создан: \${BD}/ha_config_\${TS}.tar.gz"
+  echo "Бэкап конфига успешно создан: \${BD}/ha_config_\${TS}.tar.gz"
 fi
 BEOF
+
+    cat > /usr/local/bin/ha-restore << REOF
+#!/bin/bash
+[ -z "\$BASH_VERSION" ] && { echo "Нужен bash!"; exit 1; }
+
+if command -v ha &>/dev/null; then
+  # ==========================================
+  # МЕТОД 1: Восстановление полного снапшота через HA CLI
+  # ==========================================
+  echo "Доступные полные бэкапы (снапшоты) Home Assistant:"
+  echo "--------------------------------------------------"
+  # Выводим красивый список бэкапов средствами самого HA
+  ha backups list
+  echo "--------------------------------------------------"
+  
+  read -p "Введите Slug бэкапа для восстановления (из первой колонки): " SLUG
+  [ -z "\$SLUG" ] && { echo "Отменено"; exit 1; }
+  
+  read -p "Подтвердить восстановление снапшота \$SLUG? (да/yes): " c
+  [ "\$c" != "да" ] && [ "\$c" != "yes" ] && exit 0
+  
+  echo "Восстановление... (это может занять несколько минут, HA перезапустится)"
+  # Утилита ha сама отключает контейнеры, разворачивает данные и запускает HA
+  if ha backups restore "\$SLUG" 2>&1; then
+    echo "Восстановление успешно запущено/завершено!"
+  else
+    echo "ОШИБКА восстановления снапшота!"
+    exit 1
+  fi
+
+else
+  # ==========================================
+  # МЕТОД 2: Восстановление TAR (только конфиг Core) - fallback
+  # ==========================================
+  echo "Утилита 'ha' не найдена. Восстановление из TAR архива (только конфиг Core)."
+  BD="${HA_BACKUP_DIR}"
+  
+  # Динамически определяем реальный путь к конфигурации HA через Docker
+  CONFIG_DIR=\$(docker inspect homeassistant --format '{{range .Mounts}}{{if eq .Destination "/config"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+  if [ -z "\$CONFIG_DIR" ]; then
+      CONFIG_DIR="/usr/share/hassio/homeassistant"
+  fi
+  CONFIG_PARENT=\$(dirname "\$CONFIG_DIR")
+
+  mapfile -t F < <(ls -1t "\$BD"/ha_config_*.tar.gz 2>/dev/null)
+  [ \${#F[@]} -eq 0 ] && { echo "Бэкапы не найдены"; exit 1; }
+  for i in "\${!F[@]}"; do
+    SIZE=\$(du -sh "\${F[\$i]}" | awk '{print \$1}')
+    printf " %d) %s (%s)\n" "\$((i+1))" "\$(basename "\${F[\$i]}")" "\$SIZE"
+  done
+  read -p "Номер: " n
+  [[ ! "\$n" =~ ^[0-9]+\$ ]] || [ "\$n" -lt 1 ] || [ "\$n" -gt \${#F[@]} ] && exit 1
+  read -p "Подтвердить? (да/yes): " c
+  [ "\$c" != "да" ] && [ "\$c" != "yes" ] && exit 0
+  echo "Проверка..."; tar tzf "\${F[\$((n-1))]}" >/dev/null 2>&1 || { echo "Архив повреждён!"; exit 1; }
+  echo "Бэкап текущего..."; docker stop homeassistant 2>/dev/null
+  ts=\$(date +%Y%m%d_%H%M%S)
+  tar czf "\${BD}/ha_pre_restore_\${ts}.tar.gz" -C "\$CONFIG_PARENT" homeassistant 2>/dev/null
+  echo "Восстановление..."; tar xzf "\${F[\$((n-1))]}" -C "\$CONFIG_PARENT"
+  docker start homeassistant 2>/dev/null; echo "Готово!"
+fi
+REOF
+
     chmod +x /usr/local/bin/ha-backup /usr/local/bin/ha-restore
     msg_ok "Система бэкапов"
   fi
