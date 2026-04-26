@@ -3556,8 +3556,11 @@ if command -v ha &>/dev/null; then
   # ==========================================
   echo "Создание полного бэкапа через HA CLI..."
   
-  # Утилита 'ha' сама ожидает завершения бэкапа и выводит прогресс
-  if ha backups new --full name="AutoBackup_\${TS}" 2>&1; then
+  # ИСПРАВЛЕНО: Имя передается как позиционный аргумент, без --name.
+  # stdout >/dev/null, чтобы не засорять консоль JSON, stderr оставляем для прогресса.
+  ha backups new "AutoBackup_\${TS}" >/dev/null 2>&1
+  
+  if [ \$? -eq 0 ]; then
     echo "Полный бэкап успешно создан средствами HA!"
     /usr/local/bin/ha-notify "Полный бэкап CLI завершен: AutoBackup_\${TS}"
   else
@@ -3571,7 +3574,8 @@ if command -v ha &>/dev/null; then
 
   # Очистка старых бэкапов (через CLI оставляем 5 последних)
   echo "Очистка старых снапшотов (оставляем 5 последних)..."
-  SLUGS=\$(ha backups list --raw-json 2>/dev/null | jq -r '.data.backups | sort_by(.date) | .[].slug' 2>/dev/null)
+  # ИСПРАВЛЕНО: Убран флаг -j. ha backups list сама выводит JSON в stdout.
+  SLUGS=\$(ha backups list 2>/dev/null | jq -r '.data.backups | sort_by(.date) | .[].slug' 2>/dev/null)
   COUNT=\$(echo "\$SLUGS" | wc -l)
   KEEP=5
   
@@ -3650,7 +3654,7 @@ if command -v ha &>/dev/null; then
   
   echo "Восстановление... (это может занять несколько минут, HA перезапустится)"
   # Утилита ha сама отключает контейнеры, разворачивает данные и запускает HA
-  if ha backups restore "\$SLUG" 2>&1; then
+  if ha backups restore "\$SLUG"; then
     echo "Восстановление успешно запущено/завершено!"
   else
     echo "ОШИБКА восстановления снапшота!"
@@ -3670,6 +3674,7 @@ else
       CONFIG_DIR="/usr/share/hassio/homeassistant"
   fi
   CONFIG_PARENT=\$(dirname "\$CONFIG_DIR")
+  CONFIG_NAME=\$(basename "\$CONFIG_DIR")
 
   mapfile -t F < <(ls -1t "\$BD"/ha_config_*.tar.gz 2>/dev/null)
   [ \${#F[@]} -eq 0 ] && { echo "Бэкапы не найдены"; exit 1; }
@@ -3684,7 +3689,7 @@ else
   echo "Проверка..."; tar tzf "\${F[\$((n-1))]}" >/dev/null 2>&1 || { echo "Архив повреждён!"; exit 1; }
   echo "Бэкап текущего..."; docker stop homeassistant 2>/dev/null
   ts=\$(date +%Y%m%d_%H%M%S)
-  tar czf "\${BD}/ha_pre_restore_\${ts}.tar.gz" -C "\$CONFIG_PARENT" homeassistant 2>/dev/null
+  tar czf "\${BD}/ha_pre_restore_\${ts}.tar.gz" -C "\$CONFIG_PARENT" "\$CONFIG_NAME" 2>/dev/null
   echo "Восстановление..."; tar xzf "\${F[\$((n-1))]}" -C "\$CONFIG_PARENT"
   docker start homeassistant 2>/dev/null; echo "Готово!"
 fi
