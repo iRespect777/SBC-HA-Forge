@@ -2277,7 +2277,8 @@ show_main_menu() {
       echo ""
       read -n 1 -s -r -p "Нажмите любую клавишу для возврата в меню..."
       echo ""
-      return 0
+      IMMEDIATE_ACTION=true
+      RUN_WIZARD=false # Важно: чтобы случайно не запустился мастер установки
       ;;
     restore)
       if [ -x /usr/local/bin/ha-restore ]; then
@@ -2289,7 +2290,8 @@ show_main_menu() {
       echo ""
       read -n 1 -s -r -p "Нажмите любую клавишу для возврата в меню..."
       echo ""
-      return 0
+      IMMEDIATE_ACTION=true
+      RUN_WIZARD=false
       ;;
     health)
       if [ -x /usr/local/bin/ha-health ]; then
@@ -2301,7 +2303,8 @@ show_main_menu() {
       echo ""
       read -n 1 -s -r -p "Нажмите любую клавишу для возврата в меню..."
       echo ""
-      return 0
+      IMMEDIATE_ACTION=true
+      RUN_WIZARD=false
       ;;
     rescue)     DO_RESCUE=true; RUN_WIZARD=false;;
     benchmark) DO_BENCHMARK=true; RUN_WIZARD=false;;
@@ -5657,11 +5660,13 @@ main() {
   # Интерактивный режим: цикл меню → wizard → меню
   if [ $# -eq 0 ] && [ "$RUN_WIZARD" = true ]; then
         while true; do
+            IMMEDIATE_ACTION=false # Сбрасываем флаг разовых действий
+            
             if [ -t 0 ] && [ -t 1 ]; then
                 show_main_menu || exit 0
             fi
 
-      # Обработка выбора из меню
+      # Обработка выбора из меню (режимы с выходом из скрипта)
       [ "$CHECK_ONLY" = true ]      && { show_banner; do_check; exit 0; }
       [ "$SHOW_STATUS" = true ]     && { do_status; exit 0; }
       [ "$UNINSTALL" = true ]       && { show_banner; acquire_lock; do_uninstall; exit 0; }
@@ -5672,6 +5677,12 @@ main() {
       [ "$DO_RESCUE" = true ]       && { show_banner; do_rescue; exit 0; }
       [ "$DO_EXPORT_CONFIG" = true ] && { show_banner; export_config; exit 0; }
       [ "$DO_SHOW_HISTORY" = true ] && { show_banner; show_history; exit 0; }
+
+      # Если выбрано немедленное действие (бэкап, здоровье, восстановление) - возвращаемся в меню
+      if [ "$IMMEDIATE_ACTION" = true ]; then
+          RUN_WIZARD=true # Восстанавливаем для следующего прохода
+          continue
+      fi
 
       # install выбран → тест железа → wizard
             if [ "$RUN_WIZARD" = true ] && [ "$DRY_RUN" = false ]; then
