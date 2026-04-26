@@ -2443,6 +2443,7 @@ step_install_deps() {
   [ "$OPT_AUTOUPDATE" = true ]    && pkgs+=(unattended-upgrades)
   [ "$OPT_BACKUP" = true ]        && pkg_available pigz && pkgs+=(pigz)
   [ "$OPT_REMOTE_BACKUP" = true ] && pkg_available rsync && pkgs+=(rsync)
+  [ "$OPT_REMOTE_BACKUP" = true ] && pkg_available rclone && pkgs+=(rclone)
   [ "$OPT_REVERSE_PROXY" = true ] && pkgs+=(nginx certbot python3-certbot-nginx)
 
   is_armbian && systemctl is-active --quiet armbian-hardware-optimization 2>/dev/null || {
@@ -3707,64 +3708,61 @@ REOF
 REMOTE="${REMOTE_BACKUP_TARGET}"
 BD="${HA_BACKUP_DIR}"
 
+# Определяем, какой файл бэкапить (Полный снапшот или TAR)
 if command -v ha &>/dev/null; then
-  # ==========================================
-  # МЕТОД 1: Копирование полного снапшота (HA CLI)
-  # ==========================================
-  # ИСПРАВЛЕНО: Убран несуществующий флаг -j. JSON идет в stdout, таблица в stderr.
   LATEST_SLUG=\$(ha backups list 2>/dev/null | jq -r '.data.backups | sort_by(.date) | reverse | .[0].slug' 2>/dev/null)
-  
-  if [ -z "\$LATEST_SLUG" ]; then
-    echo "Снапшоты не найдены"; exit 1
+  if [ -n "\$LATEST_SLUG" ]; then
+    SNAPSHOT_DIR="/usr/share/hassio/backup"
+    LATEST_FILE="\${SNAPSHOT_DIR}/\${LATEST_SLUG}.tar"
   fi
-  
-  # Супервизор хранит снапшоты в /usr/share/hassio/backup/
-  # (Символическая ссылка с --data-dir обрабатывается автоматически)
-  SNAPSHOT_DIR="/usr/share/hassio/backup"
-  LATEST_FILE="\${SNAPSHOT_DIR}/\${LATEST_SLUG}.tar"
-  
-  if [ ! -f "\$LATEST_FILE" ]; then
-    echo "Файл снапшота не найден: \$LATEST_FILE"; exit 1
-  fi
-  
-  case "\$REMOTE" in
-    ssh://*) 
-      # Предпочитаем rsync для докачки больших файлов, если доступен. Иначе scp.
-      if command -v rsync &>/dev/null; then
-        rsync -avz --progress -e "ssh -o StrictHostKeyChecking=no" "\$LATEST_FILE" "\${REMOTE#ssh://}" \
-          && /usr/local/bin/ha-notify "Удал. бэкап (Снапшот rsync) -> OK" \
-          || /usr/local/bin/ha-notify "Удал. бэкап (Снапшот rsync) -> ОШИБКА"
-      else
-        scp -o StrictHostKeyChecking=no "\$LATEST_FILE" "\${REMOTE#ssh://}" \
-          && /usr/local/bin/ha-notify "Удал. бэкап (Снапшот scp) -> OK" \
-          || /usr/local/bin/ha-notify "Удал. бэкап (Снапшот scp) -> ОШИБКА"
-      fi
-      ;;
-    *) /usr/local/bin/ha-notify "Удал. бэкап: неизвестный протокол (\$REMOTE)" ;;
-  esac
-
-else
-  # ==========================================
-  # МЕТОД 2: Копирование TAR архива (Fallback)
-  # ==========================================
-  LATEST=\$(ls -1t "\$BD"/ha_config_*.tar.gz 2>/dev/null | head -1)
-  [ -z "\$LATEST" ] && { echo "Локальные TAR бэкапы не найдены"; exit 1; }
-  
-  case "\$REMOTE" in
-    ssh://*) 
-      if command -v rsync &>/dev/null; then
-        rsync -avz --progress -e "ssh -o StrictHostKeyChecking=no" "\$LATEST" "\${REMOTE#ssh://}" \
-          && /usr/local/bin/ha-notify "Удал. бэкап (TAR rsync) -> OK" \
-          || /usr/local/bin/ha-notify "Удал. бэкап (TAR rsync) -> ОШИБКА"
-      else
-        scp -o StrictHostKeyChecking=no "\$LATEST" "\${REMOTE#ssh://}" \
-          && /usr/local/bin/ha-notify "Удал. бэкап (TAR scp) -> OK" \
-          || /usr/local/bin/ha-notify "Удал. бэкап (TAR scp) -> ОШИБКА"
-      fi
-      ;;
-    *) /usr/local/bin/ha-notify "Удал. бэкап: неизвестный протокол (\$REMOTE)" ;;
-  esac
 fi
+
+# Если HA CLI не дал результата, ищем TAR fallback
+if [ -z "\$LATEST_FILE" ] || [ ! -f "\$LATEST_FILE" ]; then
+  LATEST_FILE=\$(ls -1t "\$BD"/ha_config_*.tar.gz 2>/dev/null | head -1)
+fi
+
+if [ -z "\$LATEST_FILE" ] || [ ! -f "\$LATEST_FILE" ]; then
+  echo "Локальные бэкапы не найдены"; exit 1
+fi
+
+echo "Отправка бэкапа \$(basename "\$LATEST_FILE") в \$REMOTE ..."
+
+case "\$REMOTE" in
+  rclone://*)
+    # ==========================================
+    # МЕТОД 1: Облачные диски через rclone
+    # ==========================================
+    if ! command -v rclone &>/dev/null; then
+      echo "ОШИБКА: rclone не установлен (apt install rclone)"; exit 1
+    fi
+    # Отрезаем префикс rclone:// -> получаем remote:path
+    RCLONE_TARGET="\${REMOTE#rclone://}"
+    
+    rclone copy "\$LATEST_FILE" "\$RCLONE_TARGET" --progress
+    if [ \$? -eq 0 ]; then
+      /usr/local/bin/ha-notify "Удал. бэкап (rclone) -> OK"
+    else
+      /usr/local/bin/ha-notify "Удал. бэкап (rclone) -> ОШИБКА"
+    fi
+    ;;
+  ssh://*)
+    # ==========================================
+    # МЕТОД 2: Собственный сервер через rsync
+    # ==========================================
+    rsync -avz --partial --progress -e "ssh -o StrictHostKeyChecking=no" "\$LATEST_FILE" "\${REMOTE#ssh://}"
+    if [ \$? -eq 0 ]; then
+      /usr/local/bin/ha-notify "Удал. бэкап (SSH rsync) -> OK"
+    else
+      /usr/local/bin/ha-notify "Удал. бэкап (SSH rsync) -> ОШИБКА"
+    fi
+    ;;
+  *)
+    /usr/local/bin/ha-notify "Удал. бэкап: неизвестный протокол (\$REMOTE)"
+    echo "Ошибка: Используйте префикс ssh:// или rclone://"
+    exit 1
+    ;;
+esac
 RBEOF
     chmod +x /usr/local/bin/ha-backup-remote
     msg_ok "Удалённый бэкап"
