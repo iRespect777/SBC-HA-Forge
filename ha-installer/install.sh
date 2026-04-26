@@ -84,7 +84,7 @@ CURRENT_STEP_NUM=0
 # v9.0+ options
 OPT_TIMEZONE=""; OPT_DATA_DIR=""; OPT_WIFI_SSID=""; OPT_WIFI_PASS=""
 OPT_WEBHOOK_URL=""; OPT_SWAP_SIZE=""; OPT_DOCKER_MIRROR=""
-OPT_RESTORE_BACKUP=""; OPT_AUTO_REBOOT=false; OPT_LOCALE=""
+OPT_RESTORE_BACKUP=""; OPT_HA_API_TOKEN=""; OPT_AUTO_REBOOT=false; OPT_LOCALE=""
 
 SYSTEM_INFO_LOADED=false
 CACHED_CODENAME=""; CACHED_VERSION_ID=""
@@ -356,6 +356,7 @@ OPT_SWAP_SIZE="${OPT_SWAP_SIZE}"
 OPT_DOCKER_MIRROR="${OPT_DOCKER_MIRROR}"
 OPT_AUTO_REBOOT=${OPT_AUTO_REBOOT}
 OPT_LOCALE="${OPT_LOCALE}"
+OPT_HA_API_TOKEN="${OPT_HA_API_TOKEN}"
 PROFILE="${PROFILE}"
 EOF
   chmod 600 "$HA_CONFIG_FILE"
@@ -376,7 +377,7 @@ load_config() {
         OS_RELEASE_FAKED|OPT_ZRAM|OPT_UFW|OPT_WATCHDOG|\
         OPT_THERMAL|OPT_BACKUP|OPT_HACS|OPT_MONITORING|PROFILE|\
         OPT_DATA_DIR|OPT_TIMEZONE|OPT_WEBHOOK_URL|OPT_SWAP_SIZE|\
-        OPT_DOCKER_MIRROR|OPT_AUTO_REBOOT|OPT_LOCALE)
+        OPT_DOCKER_MIRROR|OPT_AUTO_REBOOT|OPT_LOCALE|OPT_HA_API_TOKEN)
           printf -v "$key" '%s' "$val"
           ;;
       esac
@@ -1680,9 +1681,14 @@ generate_info_file() {
 
 КОМАНДЫ:
   ha-health          Отчёт о здоровье
-  ha-backup          Создать бэкап
+  ha-backup          Создать бэкап (если нет API токена - только конфиг Core)
   ha-restore         Восстановить из бэкапа
   ha-notify "текст"  Отправить уведомление
+
+ПОЛНЫЙ БЭКАП (Через API HA - сохраняет аддоны и БД):
+  1. Создайте Long-Lived Access Token в: Настройки профиля -> Безопасность
+  2. Сохраните токен: echo 'ТОКЕН' | sudo tee /var/lib/ha-installer/secrets/ha_api_token
+  После этого ha-backup будет автоматически создавать полный снапшот системы.
 
 ОБСЛУЖИВАНИЕ:
   sudo ha-install --check       Диагностика
@@ -3320,9 +3326,16 @@ step_extras() {
   printf '%s' "${TG_TOKEN}"        > "${secrets_dir}/tg_token"
   printf '%s' "${TG_CHAT}"         > "${secrets_dir}/tg_chat"
   printf '%s' "${OPT_WEBHOOK_URL}" > "${secrets_dir}/webhook_url"
+  
+  # Сохраняем API токен только если он введен (не создаем пустой файл)
+  if [ -n "${OPT_HA_API_TOKEN}" ]; then
+    printf '%s' "${OPT_HA_API_TOKEN}" > "${secrets_dir}/ha_api_token"
+  fi
+  
   chmod 600 "${secrets_dir}/tg_token" \
             "${secrets_dir}/tg_chat" \
-            "${secrets_dir}/webhook_url"
+            "${secrets_dir}/webhook_url" \
+            "${secrets_dir}/ha_api_token" 2>/dev/null
 
   # Heredoc с кавычками << 'NTEOF' означает что bash НЕ делает
   # никаких подстановок внутри — всё записывается буквально.
@@ -3534,53 +3547,125 @@ set -f
 BD="${HA_BACKUP_DIR}"; HD="${HASSIO_DIR}"; KD=30
 TS=\$(date +%Y%m%d_%H%M%S); mkdir -p "\$BD"
 
-if [ ! -d "\${HD}/homeassistant" ]; then
-  echo "Ошибка: Каталог \${HD}/homeassistant не найден."
-  echo "Убедитесь, что Home Assistant установлен и запущен хотя бы один раз."
-  exit 1
-fi
+# Читаем API токен и УДАЛЯЕМ пробелы/переносы строк (защита от кривого копирования)
+HA_TOKEN=\$(cat /var/lib/ha-installer/secrets/ha_api_token 2>/dev/null | tr -d '[:space:]' || echo "")
+HA_URL="http://localhost:8123"
 
-EX="--exclude=*.db --exclude=*.db-shm --exclude=*.db-wal --exclude=home-assistant_v2.db* --exclude=tts --exclude=deps --exclude=__pycache__"
+if [ -n "\$HA_TOKEN" ]; then
+  # ==========================================
+  # МЕТОД 1: Полный снапшот через HA API
+  # ==========================================
+  if ! command -v jq &>/dev/null; then
+    echo "Ошибка: Для API бэкапа необходима утилита jq (apt install jq)."
+    /usr/local/bin/ha-notify "Бэкап API: ОШИБКА (jq не установлен)"
+    exit 1
+  fi
 
-if command -v pigz &>/dev/null; then
-  tar -I pigz -cf "\${BD}/ha_config_\${TS}.tar.gz" \$EX -C "\$HD" homeassistant
+  echo "Создание полного бэкапа через API Home Assistant..."
+  
+  RESPONSE=\$(curl -s -X POST "\${HA_URL}/api/hassio/backups/new/full" \
+    -H "Authorization: Bearer \$HA_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\\\"name\\\":\\\"AutoBackup_\${TS}\\\"}")
+    
+  SLUG=\$(echo "\$RESPONSE" | jq -r '.data.slug' 2>/dev/null)
+  
+  # Проверяем, что API принял запрос. Если токен неверный, SLUG будет "null" или пустым.
+  if [ -z "\$SLUG" ] || [ "\$SLUG" = "null" ]; then
+    echo "Ошибка запуска бэкапа через API (проверьте токен!). Ответ: \$(echo "\$RESPONSE" | head -c 200)"
+    /usr/local/bin/ha-notify "Бэкап API: ОШИБКА запуска"
+    exit 1
+  fi
+  
+  echo "Бэкап запущен (Slug: \${SLUG}). Ожидание завершения (может занять 10-30 мин)..."
+  /usr/local/bin/ha-notify "Бэкап API запущен (\${SLUG})"
+  
+  # Ожидание завершения (проверяем статус каждые 30 секунд, макс 45 минут)
+  ELAPSED=0
+  while [ \$ELAPSED -lt 2700 ]; do
+    STATUS_JSON=\$(curl -s "\${HA_URL}/api/hassio/backups/\${SLUG}" \
+      -H "Authorization: Bearer \$HA_TOKEN")
+    STATUS=\$(echo "\$STATUS_JSON" | jq -r '.data.status' 2>/dev/null)
+    
+    if [ "\$STATUS" = "completed" ]; then
+      SIZE=\$(echo "\$STATUS_JSON" | jq -r '.data.size' 2>/dev/null)
+      echo "Полный бэкап успешно создан! Slug: \${SLUG}, Размер: \${SIZE}МБ"
+      /usr/local/bin/ha-notify "Бэкап API завершен: \${SLUG} (\${SIZE}МБ)"
+      break
+    elif [ "\$STATUS" = "failed" ] || [ "\$STATUS" = "null" ]; then
+      echo "Ошибка создания бэкапа через API! Статус: \$STATUS"
+      /usr/local/bin/ha-notify "Бэкап API: ОШИБКА (\${SLUG})"
+      exit 1
+    fi
+    
+    sleep 30
+    ELAPSED=\$((ELAPSED + 30))
+    echo "Ожидание... (\$ELAPSED сек, статус: \$STATUS)"
+  done
+  
+  if [ \$ELAPSED -ge 2700 ]; then
+    echo "Таймаут ожидания бэкапа API."
+    /usr/local/bin/ha-notify "Бэкап API: Таймаут (\${SLUG})"
+    exit 1
+  fi
+
+  # Очистка старых бэкапов через API (оставляем последние 5 штук)
+  echo "Очистка старых снапшотов API (оставляем 5 последних)..."
+  SLUGS=\$(curl -s "\${HA_URL}/api/hassio/backups" \
+    -H "Authorization: Bearer \$HA_TOKEN" | \
+    jq -r '.data.backups | sort_by(.date) | .[].slug' 2>/dev/null)
+    
+  COUNT=\$(echo "\$SLUGS" | wc -l)
+  KEEP=5
+  
+  if [ "\$COUNT" -gt "\$KEEP" ]; then
+    DELETE_COUNT=\$((COUNT - KEEP))
+    echo "\$SLUGS" | head -n \$DELETE_COUNT | while read -r del_slug; do
+      curl -s -X POST "\${HA_URL}/api/hassio/backups/\${del_slug}/remove" \
+        -H "Authorization: Bearer \$HA_TOKEN" >/dev/null
+      echo "Удален старый снапшот: \${del_slug}"
+    done
+  fi
+
 else
-  tar czf "\${BD}/ha_config_\${TS}.tar.gz" \$EX -C "\$HD" homeassistant
+  # ==========================================
+  # МЕТОД 2: Быстрый бэкап папки конфига (TAR)
+  # ==========================================
+  echo "API Token не найден. Используется быстрый бэкап (только конфиг Core)."
+  echo ""
+  echo "ВНИМАНИЕ: Этот бэкап НЕ включает аддоны (Zigbee2MQTT, ESPHome) и базы данных!"
+  echo "Для создания ПОЛНОГО бэкапа через API выполните 3 шага:"
+  echo "  1. Откройте HA: http://\$(hostname -I 2>/dev/null | awk '{print \$1}'):8123"
+  echo "  2. Перейдите: Настройки профиля -> Безопасность -> Токены доступа"
+  echo "  3. Создайте токен и сохраните его в систему командой:"
+  echo "     echo 'ВАШ_ТОКЕН' | sudo tee /var/lib/ha-installer/secrets/ha_api_token"
+  echo ""
+  
+  if [ ! -d "\${HD}/homeassistant" ]; then
+    echo "Ошибка: Каталог \${HD}/homeassistant не найден."
+    echo "Убедитесь, что Home Assistant установлен и запущен хотя бы один раз."
+    exit 1
+  fi
+  
+  EX="--exclude=*.db --exclude=*.db-shm --exclude=*.db-wal --exclude=home-assistant_v2.db* --exclude=tts --exclude=deps --exclude=__pycache__"
+  
+  if command -v pigz &>/dev/null; then
+    tar -I pigz -cf "\${BD}/ha_config_\${TS}.tar.gz" \$EX -C "\$HD" homeassistant
+  else
+    tar czf "\${BD}/ha_config_\${TS}.tar.gz" \$EX -C "\$HD" homeassistant
+  fi
+  
+  if [ \$? -ne 0 ]; then
+    echo "Ошибка при создании tar архива!"
+    exit 1
+  fi
+  
+  find "\$BD" -name "ha_config_*.tar.gz" -mtime +\$KD -delete 2>/dev/null
+  BSIZE=\$(du -sh "\${BD}/ha_config_\${TS}.tar.gz" 2>/dev/null | awk '{print \$1}')
+  /usr/local/bin/ha-notify "Бэкап TAR: \$BSIZE"
+  echo "Бэкап конфига создан: \${BD}/ha_config_\${TS}.tar.gz"
 fi
-
-if [ \$? -ne 0 ]; then
-  echo "Ошибка при создании архива!"
-  exit 1
-fi
-
-find "\$BD" -name "ha_config_*.tar.gz" -mtime +\$KD -delete 2>/dev/null
-
-BSIZE=\$(du -sh "\${BD}/ha_config_\${TS}.tar.gz" 2>/dev/null | awk '{print \$1}')
-/usr/local/bin/ha-notify "Бэкап: \$BSIZE"
-echo "Бэкап успешно создан: \${BD}/ha_config_\${TS}.tar.gz"
 BEOF
-
-    cat > /usr/local/bin/ha-restore << REOF
-#!/bin/bash
-[ -z "\$BASH_VERSION" ] && { echo "Нужен bash!"; exit 1; }
-BD="${HA_BACKUP_DIR}"; HD="${HASSIO_DIR}"
-mapfile -t F < <(ls -1t "\$BD"/ha_config_*.tar.gz 2>/dev/null)
-[ \${#F[@]} -eq 0 ] && { echo "Бэкапы не найдены"; exit 1; }
-for i in "\${!F[@]}"; do
-  SIZE=\$(du -sh "\${F[\$i]}" | awk '{print \$1}')
-  printf " %d) %s (%s)\n" "\$((i+1))" "\$(basename "\${F[\$i]}")" "\$SIZE"
-done
-read -p "Номер: " n
-[[ ! "\$n" =~ ^[0-9]+\$ ]] || [ "\$n" -lt 1 ] || [ "\$n" -gt \${#F[@]} ] && exit 1
-read -p "Подтвердить? (да/yes): " c
-[ "\$c" != "да" ] && [ "\$c" != "yes" ] && exit 0
-echo "Проверка..."; tar tzf "\${F[\$((n-1))]}" >/dev/null 2>&1 || { echo "Архив повреждён!"; exit 1; }
-echo "Бэкап текущего..."; docker stop homeassistant 2>/dev/null
-ts=\$(date +%Y%m%d_%H%M%S)
-tar czf "\${BD}/ha_pre_restore_\${ts}.tar.gz" -C "\$HD" homeassistant 2>/dev/null
-echo "Восстановление..."; tar xzf "\${F[\$((n-1))]}" -C "\$HD"
-docker start homeassistant 2>/dev/null; echo "Готово!"
-REOF
     chmod +x /usr/local/bin/ha-backup /usr/local/bin/ha-restore
     msg_ok "Система бэкапов"
   fi
@@ -5335,6 +5420,7 @@ HA Установщик v${SCRIPT_VERSION}
     --machine ТИП                       Тип машины HA
     --os-agent-ver X                    Версия OS-Agent
     --ha-ver X                          Версия HA
+    --ha-api-token ТОКЕН               Токен долгосрочного доступа HA для полных бэкапов
 
   ФАЙЛЫ:
     ${HA_INSTALLER_DIR}/                Конфигурация и состояние
@@ -5403,6 +5489,8 @@ parse_args() {
       --os-agent-ver=*)     OVERRIDE_OS_AGENT_VER="${1#*=}";;
       --ha-ver)             shift; [ $# -eq 0 ] && { msg_error "--ha-ver ?"; exit 1; }; OVERRIDE_HA_VER="$1";;
       --ha-ver=*)           OVERRIDE_HA_VER="${1#*=}";;
+      --ha-api-token)      shift; [ $# -eq 0 ] && { msg_error "--ha-api-token ?"; exit 1; }; OPT_HA_API_TOKEN="$1";;
+      --ha-api-token=*)    OPT_HA_API_TOKEN="${1#*=}";;
       *)                    msg_error "Неизвестная опция: $1"; show_help; exit 1;;
     esac
     shift
@@ -5510,6 +5598,18 @@ show_final() {
   echo -e "\n   ${YELLOW}Инициализация HA занимает 10-15 минут.${NC}\n"
 
   generate_info_file
+  # Инструкция по полному бэкапу
+  if [ "$OPT_BACKUP" = true ] && [ -z "$OPT_HA_API_TOKEN" ]; then
+    echo -e "\n   ${YELLOW}${BOLD}Важно про бэкапы:${NC}"
+    echo -e "   ${DIM}Сейчас настроен быстрый бэкап (только файлы конфигурации Core)."
+    echo -e "   ${DIM}Он НЕ сохраняет аддоны (Zigbee2MQTT, Node-RED) и базы данных."
+    echo -e "   ${DIM}Чтобы включить ПОЛНЫЙ бэкап через API:${NC}"
+    echo -e "   ${WHITE}1.${NC} Откройте HA -> Настройки профиля -> Безопасность -> Токены доступа"
+    echo -e "   ${WHITE}2.${NC} Создайте Long-Lived Access Token и скопируйте его"
+    echo -e "   ${WHITE}3.${NC} Выполните в консоли команду:"
+    echo -e "   ${CYAN}echo 'Ваш_Токен' | sudo tee /var/lib/ha-installer/secrets/ha_api_token${NC}"
+    echo ""
+  fi
   send_notification "HA установлен: http://${ip}:8123"
 }
 
