@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
 # Home Assistant Supervised - ULTIMATE INSTALLER
-# Version: 9.9
+# Version: 9.9.1
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/HAS-tvbox
@@ -16,7 +16,7 @@ if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
 fi
 
-readonly SCRIPT_VERSION="9.9"
+readonly SCRIPT_VERSION="9.9.1"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly INSTALLER_REPO="mediahome/ha-installer"
 readonly HA_INSTALLER_DIR="/var/lib/ha-installer"
@@ -2664,13 +2664,26 @@ step_configure_network() {
 
   if [ "$OPT_STATIC_IP" = true ] && [ -n "$STATIC_IP" ]; then
     sleep 3
-    local ac; ac=$(nmcli -t -f NAME con show --active 2>/dev/null | head -1)
-    [ -n "$ac" ] && {
+    local target_con=""
+
+    # Если мы настраивали WiFi, статический IP нужно применить именно к WiFi-профилю.
+    # Ищем активное соединение, имя которого совпадает с SSID.
+    # Это безопаснее, чем парсить тип соединения, так как SSID может содержать двоеточия.
+    if [ -n "$OPT_WIFI_SSID" ]; then
+      target_con=$(nmcli -t -f NAME con show --active 2>/dev/null | grep -F "$OPT_WIFI_SSID" | head -1)
+    fi
+
+    # Если WiFi-профиль не найден (или WiFi не просили), применяем к первому активному (обычно Ethernet)
+    if [ -z "$target_con" ]; then
+      target_con=$(nmcli -t -f NAME con show --active 2>/dev/null | head -1)
+    fi
+
+    [ -n "$target_con" ] && {
       local pf; pf=$(get_current_prefix); [ -z "$pf" ] && pf="24"
-      nmcli con mod "$ac" ipv4.addresses "${STATIC_IP}/${pf}" \
+      nmcli con mod "$target_con" ipv4.addresses "${STATIC_IP}/${pf}" \
         ipv4.gateway "$STATIC_GW" ipv4.dns "$STATIC_DNS" ipv4.method manual 2>/dev/null
-      nmcli con up "$ac" 2>/dev/null
-      msg_ok "Стат. IP: ${STATIC_IP}/${pf}"
+      nmcli con up "$target_con" 2>/dev/null
+      msg_ok "Стат. IP: ${STATIC_IP}/${pf} (${target_con})"
     }
   fi
 
