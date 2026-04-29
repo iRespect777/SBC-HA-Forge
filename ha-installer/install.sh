@@ -5104,7 +5104,11 @@ Docker и сеть останутся.\n\
             if grep -qE "^auto|^iface|^allow-" "${BACKUP_DIR}/interfaces.bak" 2>/dev/null; then
                 # Бэкап содержит реальные интерфейсы (не только lo)
                 local real_ifaces
-                real_ifaces=$(grep -cE "^auto [^l]|^iface [^l]" "${BACKUP_DIR}/interfaces.bak" 2>/dev/null || echo 0)
+                # grep -c сам выводит 0, если ничего не нашёл, но выдаёт код ошибки.
+                # Поэтому используем || true, чтобы подавить ошибку, а не добавлять второй ноль.
+                real_ifaces=$(grep -cE "^auto [^l]|^iface [^l]" "${BACKUP_DIR}/interfaces.bak" 2>/dev/null || true)
+                # Если вывод пустой (файл не читается), подставляем 0
+                real_ifaces="${real_ifaces:-0}"
                 if [ "$real_ifaces" -gt 0 ]; then
                     use_ifupdown=true
                 fi
