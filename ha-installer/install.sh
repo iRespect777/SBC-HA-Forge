@@ -1561,9 +1561,25 @@ setup_locale() {
 setup_wifi() {
   [ -z "$OPT_WIFI_SSID" ] && return 0
   command -v nmcli &>/dev/null || { msg_warn "nmcli недоступен для WiFi"; return 0; }
+
+  # Защита от обрыва SSH: проверяем активный интерфейс маршрута по умолчанию
+  local active_iface=""
+  active_iface=$(ip route list default 2>/dev/null | awk '{print $5}' | head -1)
+  
+  # Если имя интерфейса начинается на 'w' (wlan0, wlp2s0 и т.д.), значит мы уже на WiFi
+  if [[ "$active_iface" == w* ]]; then
+    msg_ok "WiFi уже используется (${active_iface})"
+    msg_dim "Подключение к '${OPT_WIFI_SSID}' пропущено для защиты текущей SSH-сессии"
+    return 0
+  fi
+
   msg_action "WiFi: ${OPT_WIFI_SSID}..."
-  nmcli dev wifi connect "$OPT_WIFI_SSID" password "$OPT_WIFI_PASS" 2>/dev/null && \
-    msg_ok "WiFi подключён" || msg_warn "WiFi не удалось подключить"
+  # Если мы дошли сюда, значит мы на Ethernet. Можно безопасно подключать WiFi.
+  if nmcli dev wifi connect "$OPT_WIFI_SSID" password "$OPT_WIFI_PASS" 2>/dev/null; then
+    msg_ok "WiFi подключён"
+  else
+    msg_warn "WiFi не удалось подключить"
+  fi
 }
 
 setup_swap() {
@@ -2404,7 +2420,6 @@ step_update_system() {
   header "[${CURRENT_STEP_NUM}/${TOTAL_STEPS}] ОБНОВЛЕНИЕ СИСТЕМЫ"
   setup_timezone
   setup_locale
-  setup_wifi
   if [ "$SKIP_UPDATE" = false ]; then
     run_cmd_fatal "apt update" apt_safe update -y
     run_cmd "apt upgrade" apt_safe upgrade -y
@@ -2642,6 +2657,10 @@ step_configure_network() {
   # Теперь NM настроен — можно запускать
   systemctl enable NetworkManager 2>/dev/null || true
   systemctl restart NetworkManager 2>/dev/null || true
+
+  # Даем NM пару секунд на запуск и подключаем WiFi (если выбран и безопасно)
+  sleep 2
+  setup_wifi
 
   if [ "$OPT_STATIC_IP" = true ] && [ -n "$STATIC_IP" ]; then
     sleep 3
