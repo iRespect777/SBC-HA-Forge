@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
 # Home Assistant Supervised - ULTIMATE INSTALLER
-# Version: 9.9.3
+# Version: 9.9.4
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/HAS-tvbox
@@ -16,7 +16,7 @@ if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
 fi
 
-readonly SCRIPT_VERSION="9.9.3"
+readonly SCRIPT_VERSION="9.9.4"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly INSTALLER_REPO="mediahome/ha-installer"
 readonly HA_INSTALLER_DIR="/var/lib/ha-installer"
@@ -1575,9 +1575,6 @@ setup_wifi() {
 
   msg_action "WiFi: ${OPT_WIFI_SSID}..."
   
-  # Запрашиваем подключение
-  nmcli dev wifi connect "$OPT_WIFI_SSID" password "$OPT_WIFI_PASS" >/dev/null 2>&1 || true
-  
   # Находим имя WiFi интерфейса (например, wlan0)
   local wifi_dev
   wifi_dev=$(nmcli -t -f DEVICE,TYPE dev status 2>/dev/null | grep ':wifi$' | head -1 | cut -d: -f1)
@@ -1587,9 +1584,47 @@ setup_wifi() {
     return 0
   fi
 
-  # Цикл ожидания: проверяем статус каждые 2 секунды, максимум 15 секунд.
-  # NetworkManager на TV-боксах часто подключает WiFi асинхронно (в фоне),
-  # поэтому нам нужно подождать, пока статус сменится с disconnected на connected.
+  # 1. Удаляем старый профиль с таким же именем (если остался от прошлых попыток)
+  nmcli con delete "$OPT_WIFI_SSID" >/dev/null 2>&1 || true
+
+  # 2. Создаем новое соединение и явно указываем SSID
+  if ! nmcli con add type wifi ifname "$wifi_dev" con-name "$OPT_WIFI_SSID" ssid "$OPT_WIFI_SSID" >/dev/null 2>&1; then
+    msg_error "Не удалось создать профиль WiFi"
+    return 0
+  fi
+
+  # 3. Явно прописываем тип шифрования (WPA2) и пароль.
+  # Это НАДЕЖНЕЕ, чем передавать пароль через команду "connect", так как
+  # защищает от ломания спецсимволов в пароле (!, @, #, $, пробелы и т.д.)
+  if [ -n "$OPT_WIFI_PASS" ]; then
+    nmcli con modify "$OPT_WIFI_SSID" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$OPT_WIFI_PASS" >/dev/null 2>&1
+  fi
+
+  # 4. Поднимаем соединение
+  local connect_output
+  connect_output=$(nmcli con up "$OPT_WIFI_SSID" ifname "$wifi_dev" 2>&1)
+  local connect_rc=$?
+
+  # Если команда сразу вернула ошибку (например, неверный пароль или сеть не найдена)
+  if [ $connect_rc -ne 0 ]; then
+    # Дадим 3 секунды на случай асинхронного подключения
+    sleep 3
+    local wifi_state
+    wifi_state=$(nmcli -t -f DEVICE,STATE dev status 2>/dev/null | grep "^${wifi_dev}:" | head -1 | cut -d: -f2)
+    if [ "$wifi_state" = "connected" ]; then
+      msg_ok "WiFi подключён (${wifi_dev})"
+      return 0
+    fi
+
+    msg_warn "WiFi не удалось подключить"
+    # Покажем пользователю, почему именно упало (NetworkManager пишет причину в stderr)
+    msg_dim "Причина: $(echo "$connect_output" | head -2)"
+    # Удаляем нерабочий профиль, чтобы не засорять систему
+    nmcli con delete "$OPT_WIFI_SSID" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  # 5. Если команда прошла успешно, ждём получения IP-адреса
   local wait_time=0
   local max_wait=15
   local wifi_state=""
@@ -1602,20 +1637,13 @@ setup_wifi() {
       return 0
     fi
     
-    # Если NM сказал "подключаюсь", просто ждём дальше
-    if [ "$wifi_state" = "connecting" ]; then
-      : # пустая операция (noop), просто ждём
-    elif [ "$wifi_state" = "disconnected" ] && [ $wait_time -eq 0 ]; then
-      # Если отключен в первую секунду — это нормально, только начал подключаться
-      : 
-    fi
-    
     sleep 2
     wait_time=$((wait_time + 2))
   done
 
-  # Если вышли по таймауту
-  msg_warn "WiFi не удалось подключить за ${max_wait}с (статус: ${wifi_state:-нет ответа})"
+  # Вышли по таймауту
+  msg_warn "WiFi: таймаут получения IP (статус: ${wifi_state:-нет ответа})"
+  msg_dim "Сеть может появиться позже"
 }
 
 setup_swap() {
