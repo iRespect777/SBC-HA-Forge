@@ -1566,7 +1566,7 @@ setup_wifi() {
   local active_iface=""
   active_iface=$(ip route list default 2>/dev/null | awk '{print $5}' | head -1)
   
-  # Если имя интерфейса начинается на 'w' (wlan0, wlp2s0 и т.д.), значит мы уже на WiFi
+  # Если имя интерфейса начинается на 'w' (wlan0, wlp2s0), значит мы уже на WiFi
   if [[ "$active_iface" == w* ]]; then
     msg_ok "WiFi уже используется (${active_iface})"
     msg_dim "Подключение к '${OPT_WIFI_SSID}' пропущено для защиты текущей SSH-сессии"
@@ -1574,8 +1574,17 @@ setup_wifi() {
   fi
 
   msg_action "WiFi: ${OPT_WIFI_SSID}..."
-  # Если мы дошли сюда, значит мы на Ethernet. Можно безопасно подключать WiFi.
-  if nmcli dev wifi connect "$OPT_WIFI_SSID" password "$OPT_WIFI_PASS" 2>/dev/null; then
+  
+  # nmcli dev wifi connect часто возвращает код ошибки, даже если соединение 
+  # успешно активировалось в фоне (особенно при медленном DHCP на TV-боксах).
+  # Поэтому мы подавляем вывод и проверяем результат через пару секунд.
+  nmcli dev wifi connect "$OPT_WIFI_SSID" password "$OPT_WIFI_PASS" >/dev/null 2>&1 || true
+  
+  # Даём NetworkManager 3 секунды на поднятие интерфейса и получение IP
+  sleep 3
+  
+  # Проверяем, появилось ли соединение с таким именем в списке активных
+  if nmcli -t -f NAME con show --active 2>/dev/null | grep -qF "$OPT_WIFI_SSID"; then
     msg_ok "WiFi подключён"
   else
     msg_warn "WiFi не удалось подключить"
