@@ -2286,7 +2286,6 @@ run_wizard() {
   [ "$OPT_TELEGRAM" = true ]      && s+="  Telegram:     да\n"
   [ -n "$OPT_WEBHOOK_URL" ]       && s+="  Webhook:      да\n"
   [ "$OPT_STATIC_IP" = true ]     && s+="  IP:           ${STATIC_IP}\n"
-  [ "$OPT_REVERSE_PROXY" = true ] && s+="  Прокси:       ${PROXY_DOMAIN}\n"
   s+="\nНачать установку?\n(Нет = вернуться в меню)"
 
   if [ "$HAS_WHIPTAIL" = true ]; then
@@ -5380,8 +5379,8 @@ Docker и сеть останутся.\n\
 
         # Показать оставшиеся зависимости
         msg_info "Установленные зависимости (можно удалить вручную):"
-        local dep_pkgs="apparmor avahi-daemon bluez network-manager fail2ban ufw"
-        dep_pkgs+=" unattended-upgrades nginx certbot python3-certbot-nginx"
+        local dep_pkgs="apparmor avahi-daemon bluez fail2ban ufw"
+        dep_pkgs+=" unattended-upgrades"
         dep_pkgs+=" zram-tools systemd-zram-generator"
         dep_pkgs+=" linux-cpupower cpufrequtils"
         local installed_deps=""
@@ -5776,7 +5775,6 @@ show_final() {
 
   echo -e "   ${GREEN}=> http://${ip}:8123${NC}"
   [ "$OPT_HOSTNAME" = true ] && echo -e "   ${GREEN}=> http://homeassistant.local:8123${NC}"
-  [ "$OPT_REVERSE_PROXY" = true ] && [ -n "$PROXY_DOMAIN" ] && echo -e "   ${GREEN}=> https://${PROXY_DOMAIN}${NC}"
 
   # WiFi QR
   if [ -n "$OPT_WIFI_SSID" ] && command -v qrencode &>/dev/null && [ "$SILENT" != true ]; then
