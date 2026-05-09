@@ -415,7 +415,7 @@ export_config() {
     for opt in OPT_ZRAM OPT_EMMC_TUNING OPT_USB_POWER OPT_UFW OPT_SSH_HARDENING \
       OPT_AUTOUPDATE OPT_WATCHDOG OPT_THERMAL OPT_BACKUP OPT_HACS OPT_HOSTNAME \
       OPT_MONITORING OPT_BOOT_RECOVERY OPT_USB_DETECT OPT_STATIC_IP OPT_TELEGRAM \
-      OPT_REMOTE_BACKUP; do
+      OPT_TAILSCALE OPT_REMOTE_BACKUP; do
       echo "${opt}=${!opt}"
     done
     echo "PROFILE=\"${PROFILE}\""
@@ -1842,13 +1842,14 @@ _wizard_select_components() {
       "HACS" "HACS" ON "HOSTNAME" "Имя хоста" ON "MONITOR" "Мониторинг" OFF \
       "USBDETECT" "Поиск USB" ON "BOOTRECOV" "Восст. загрузки" ON \
       "STATICIP" "Стат. IP" OFF "TELEGRAM" "Telegram" OFF \
+      "TAILSCALE" "Tailscale VPN (удал. доступ)" OFF \
       3>&1 1>&2 2>&3)
     [ $? -ne 0 ] && return 1
 
     OPT_ZRAM=false; OPT_EMMC_TUNING=false; OPT_USB_POWER=false; OPT_UFW=false
     OPT_SSH_HARDENING=false; OPT_AUTOUPDATE=false; OPT_WATCHDOG=false; OPT_THERMAL=false
     OPT_BACKUP=false; OPT_HACS=false; OPT_HOSTNAME=false; OPT_STATIC_IP=false
-    OPT_TELEGRAM=false; OPT_MONITORING=false
+    OPT_TELEGRAM=false; OPT_MONITORING=false; OPT_TAILSCALE=false
     OPT_REMOTE_BACKUP=false; OPT_BOOT_RECOVERY=false; OPT_USB_DETECT=false
 
     [[ $ch == *ZRAM* ]]      && OPT_ZRAM=true
@@ -1865,6 +1866,7 @@ _wizard_select_components() {
     [[ $ch == *STATICIP* ]]  && OPT_STATIC_IP=true
     [[ $ch == *TELEGRAM* ]]  && OPT_TELEGRAM=true
     [[ $ch == *MONITOR* ]]   && OPT_MONITORING=true
+    [[ $ch == *TAILSCALE* ]]  && OPT_TAILSCALE=true
     [[ $ch == *RBACKUP* ]]   && OPT_REMOTE_BACKUP=true
     [[ $ch == *BOOTRECOV* ]] && OPT_BOOT_RECOVERY=true
     [[ $ch == *USBDETECT* ]] && OPT_USB_DETECT=true
@@ -1881,6 +1883,7 @@ _wizard_select_components() {
     text_yesno "Мониторинг" "n"        && OPT_MONITORING=true   || OPT_MONITORING=false
     text_yesno "Стат. IP" "n"          && OPT_STATIC_IP=true    || OPT_STATIC_IP=false
     text_yesno "Telegram" "n"          && OPT_TELEGRAM=true     || OPT_TELEGRAM=false
+    text_yesno "Tailscale VPN" "n"     && OPT_TAILSCALE=true   || OPT_TAILSCALE=false
     text_yesno "Удал. бэкап" "n"       && OPT_REMOTE_BACKUP=true || OPT_REMOTE_BACKUP=false
   fi
   PROFILE="custom"
@@ -1945,6 +1948,8 @@ run_wizard() {
   OPT_AUTO_REBOOT=false
   TG_TOKEN=""; TG_CHAT=""
   STATIC_IP=""; STATIC_GW=""; STATIC_DNS=""
+  OPT_TAILSCALE=false
+  TS_AUTHKEY=""
   REMOTE_BACKUP_TARGET=""
 
   # =============================================
@@ -2286,6 +2291,7 @@ run_wizard() {
   [ "$OPT_TELEGRAM" = true ]      && s+="  Telegram:     да\n"
   [ -n "$OPT_WEBHOOK_URL" ]       && s+="  Webhook:      да\n"
   [ "$OPT_STATIC_IP" = true ]     && s+="  IP:           ${STATIC_IP}\n"
+  [ "$OPT_TAILSCALE" = true ]     && s+="  Tailscale:    да\n"
   s+="\nНачать установку?\n(Нет = вернуться в меню)"
 
   if [ "$HAS_WHIPTAIL" = true ]; then
@@ -4891,6 +4897,16 @@ Docker и сеть останутся.\n\
         tailscale down >/dev/null 2>&1 || true
         apt-get purge -y tailscale >/dev/null 2>&1 || true
         rm -f /etc/apt/sources.list.d/tailscale.list
+        
+        # Очистка UFW правил Tailscale (для совместимости со стандартным удалением)
+        if command -v ufw &>/dev/null && ufw status | grep -q "status: active"; then
+            ufw delete allow in on tailscale0 >/dev/null 2>&1 || true
+            ufw delete allow 41641/udp >/dev/null 2>&1 || true
+            ufw reload >/dev/null 2>&1 || true
+        fi
+        
+        # Очистка секретов
+        rm -f "${HA_INSTALLER_DIR}/secrets/ts_authkey" 2>/dev/null || true
     fi
 
     # --- Avahi ---
