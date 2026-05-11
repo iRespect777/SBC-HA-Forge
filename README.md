@@ -1,278 +1,199 @@
-## README.md
+# 🏠 Home Assistant Supervised - ULTIMATE INSTALLER
 
-```markdown
-# Home Assistant Supervised — Ultimate Installer
+[![Bash Version](https://img.shields.io/badge/Bash-4%2B-blue)](https://www.gnu.org/software/bash/)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-Автоматический установщик Home Assistant Supervised для TV-боксов, одноплатных компьютеров и x86 машин.
+Ультимативный скрипт для установки **Home Assistant Supervised** на TV-приставки, одноплатники (SBC) и мини-ПК под управлением Armbian / Debian.
 
-## Возможности
+Этот скрипт не просто устанавливает HA. Он превращает "голую" систему в защищенный, оптимизированный и отказоустойчивый сервер умного дома с автоматическим откатом при ошибках.
 
-- Полная установка HA Supervised + Docker + OS-Agent за 15-30 минут
-- Интерактивный мастер на русском языке (whiptail + text fallback)
-- 5 готовых профилей: minimal, standard, full, server, dev
-- Автоматическая подмена os-release для Armbian/Ubuntu
-- Оптимизация для TV-боксов: ZRAM, eMMC tuning, USB power fix
-- Безопасность: UFW, Fail2Ban, SSH hardening
-- Watchdog с экспоненциальным откатом
-- Автобэкапы + восстановление
-- Уведомления: Telegram, ntfy.sh, Discord, любой webhook
-- Перенос данных на внешний USB SSD
-- HACS (магазин сообщества)
-- Возобновление после сбоя (идемпотентные шаги)
-- Продолжение после перезагрузки (AppArmor)
+## ⚠️ Важное предупреждение
 
-## Поддерживаемые платформы
+Скрипт вносит изменения в сетевой стек (переключает на NetworkManager), ядро (AppArmor) и файрвол. **Обязательно имейте физический доступ (монитор/клавиатура) или UART-подключение к устройству на случай обрыва сети по SSH.** Скрипт имеет систему отката, но 100% гарантию на всех китайских TV-боксах дать невозможно.
 
-| Архитектура |                                 Устройства                                     |
-|-------------|--------------------------------------------------------------------------------|
-| aarch64     | TV-боксы (Allwinner, Amlogic, Rockchip), Raspberry Pi 3/4/5, Orange Pi, ODROID |
-| x86_64      | Мини-ПК, серверы, обычные ПК                                                   |
-| armv7l      | Raspberry Pi 2, старые SBC                                                     |
+---
 
+## ✨ Ключевые особенности
 
-|         ОС              |            Поддержка         |
-|-------------------------|------------------------------|
-| Armbian Bookworm/Trixie | Полная                       |
-| Debian 12/13            | Полная                       |
-| Ubuntu 22.04/24.04      | Базовая (подмена os-release) |
+- **🛡️ Умная установка с откатами:** Если шаг установки падает (например, ломается сеть), скрипт автоматически откатывает изменения.
+- **🔄 Автопродолжение после ребута:** Если AppArmor требует перезагрузки, скрипт создает systemd-сервис, который продолжает установку с того же места после старта системы.
+- **🌐 Бесшовная интеграция Tailscale:** Автоматическая установка, настройка UFW (открытие портов WireGuard и интерфейса tailscale0) и поддержка Auth Key.
+- **📶 Надежный Wi-Fi:** Настройка через NetworkManager с принудительным **отключением энергосбережения** (Power Save off), что решает проблему отвала VPN и телеметрии на TV-боксах. Поддержка SSID со спецсимволами и пробелами.
+- **🛡️ Безопасность из коробки:** Настройка UFW (включая правила для Docker), Fail2Ban, защита SSH.
+- **💾 Продвинутые бэкапы:** Поддержка локальных снапшотов (через HA CLI), загрузка в облако (rclone) или на удаленный сервер (rsync).
+- **🚑 Режим восстановления (Rescue):** Автоматическая диагностика и починка файловой системы, сети, Docker и Supervisor.
+- **📊 Мониторинг:** Watchdog с экспоненциальной задержкой, термомониторинг, Prometheus метрики.
 
-**Требования:** RAM 1ГБ+, диск 16ГБ+, интернет, ядро 4.x+
+---
 
-## Быстрый старт
+## 📋 Требования
 
-### Установка с мастером (рекомендуется)
+- **ОС:** Armbian (Bookworm / Trixie) или чистый Debian (11/12/13).
+- **Архитектура:** `aarch64` (ARM64), `x86_64`.
+- **RAM:** Минимум 1 ГБ (рекомендуется 2 ГБ+).
+- **Диск:** Минимум 10 ГБ свободного места.
+- **Права:** Скрипт необходимо запускать от `root` (`sudo`).
+
+---
+
+## 🚀 Быстрый старт
+
+Самый простой способ запустить установщик — использовать интерактивный мастер:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/iRespect777/HAS-tvbox/refs/heads/main/ha-installer/install.sh -o /tmp/install.sh
 sudo bash /tmp/install.sh
 ```
+Мастер проведет вас через выбор профиля, настройку сети, часового пояса и дополнительных компонентов.
 
-### Установка одной командой
+---
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/iRespect777/HAS-tvbox/refs/heads/main/ha-installer/install.sh -o /tmp/install.sh
-sudo bash /tmp/install.sh --profile standard --timezone Europe/Moscow
-```
+## ⚙️ Профили установки
 
-### TV-бокс с USB SSD
+Скрипт предлагает 5 предустановленных профилей для разных сценариев использования:
 
-```bash
-sudo bash /tmp/install.sh \
-  --profile standard \
-  --timezone Europe/Moscow \
-  --data-dir /mnt/ssd \
-  --swap zram \
-  --auto-reboot
-```
+| Профиль | Описание | Компоненты |
+|---------|----------|------------|
+| **minimal** | Только HA + Docker. Для слабых устройств. | Базовые зависимости |
+| **standard** | Рекомендуемый. Баланс безопасности и функционала. | +UFW, Fail2Ban, Watchdog, Бэкапы, HACS, ZRAM |
+| **full** | Всё включено. Для мощных мини-ПК. | +Мониторинг (Prometheus) |
+| **server** | Серверный. Для выделенных серверов. | +Статический IP, +Tailscale VPN |
+| **dev** | Для разработчиков. | Минимум системных настроек, только HACS |
 
-### Переустановка с восстановлением бэкапа
+---
 
-```bash
-sudo bash /tmp/install.sh \
-  --profile standard \
-  --timezone Europe/Moscow \
-  --restore-backup /mnt/usb/ha_config_20250101.tar.gz
-```
+## 🌐 Настройка Tailscale VPN
 
-### Headless (без вопросов, через SSH)
+Скрипт поддерживает полностью автоматическую настройку Tailscale для безопасного удаленного доступа без открытия портов.
+
+### Интерактивная установка
+В мастере установки выберите компонент `Tailscale VPN`.
+
+### Установка через CLI (автоматизация)
+Вы можете передать флаги прямо в командной строке:
 
 ```bash
-sudo bash /tmp/install.sh \
-  --profile full \
-  --timezone Europe/Moscow \
-  --webhook "https://ntfy.sh/my-ha" \
-  --auto-reboot \
-  --silent
+sudo bash install.sh --profile standard --tailscale --ts-authkey tskey-auth-ВАШ_КЛЮЧ
 ```
 
-## После установки
+**Что делает скрипт при установке Tailscale:**
+1. Устанавливает официальный пакет с репозитория Tailscale.
+2. Добавляет правила в UFW: `allow in on tailscale0` и `allow 41641/udp` (для прямых P2P-соединений WireGuard).
+3. Если предоставлен `--ts-authkey`, автоматически авторизует устройство в вашей сети с флагом `--accept-routes`.
+4. Если ключ не предоставлен, выведет инструкцию для ручной авторизации (`sudo tailscale up`).
 
-HA доступен через 10-15 минут:
+> 💡 **Совет:** Получите Auth Key в админ-панели Tailscale (Access Controls -> Auth Keys). Рекомендуется использовать ключи с галкой "Reusable".
 
-```
-http://IP-АДРЕС:8123
-http://homeassistant.local:8123
-```
+---
 
-### Полезные команды
+## 📡 Решение проблемы отвала Wi-Fi и Tailscale
 
+Владельцы TV-боксов часто сталкиваются с проблемой: Tailscale работает пару минут, а затем связь обрывается. Причина — агрессивное энергосбережение (Power Management) Wi-Fi чипа.
+
+**Этот скрипт автоматически решает проблему!** 
+При настройке Wi-Fi скрипт использует NetworkManager и принудительно прописывает параметр `802-11-wireless.powersave 2` (отключено) для вашего подключения. 
+
+Если вы настраиваете Wi-Fi вручную вне скрипта, выполните:
 ```bash
-ha-health              # Отчёт о здоровье системы
-ha-backup              # Создать бэкап
-ha-restore             # Восстановить из бэкапа
-ha-notify "текст"      # Отправить уведомление
+# Узнать имя подключения
+nmcli con show
+# Отключить энергосбережение
+sudo nmcli con modify "ИМЯ_СЕТИ" 802-11-wireless.powersave 2
+sudo nmcli con up "ИМЯ_СЕТИ"
 ```
 
-### Обслуживание
+---
 
-```bash
-sudo bash /tmp/install.sh --check        # Диагностика
-sudo bash /tmp/install.sh --status       # Мониторинг (live)
-sudo bash /tmp/install.sh --update       # Обновить HA + OS-Agent
-sudo bash /tmp/install.sh --benchmark    # Тест производительности
-sudo bash /tmp/install.sh --self-update  # Обновить скрипт
-sudo bash /tmp/install.sh --uninstall   # Удалить HA
-```
+## 🛠️ Использование CLI (полный список аргументов)
 
-## Профили
+Скрипт можно использовать не только для установки, но и для управления системой.
 
-| Профиль | Что включено |
-|---------|-------------|
-| `minimal` | Только HA + Docker |
-| `standard` | + ZRAM, UFW, SSH, Watchdog, бэкапы, HACS, eMMC tuning |
-| `full` | + Prometheus мониторинг |
-| `server` | + Статический IP + мониторинг |
-| `dev` | HA + HACS, без оптимизаций |
-
-## Все опции
-
-<details>
-<summary>Показать все опции</summary>
-
-### Режимы
-
-| Опция | Описание |
-|-------|----------|
-| `-c`, `--check` | Диагностика |
-| `-s`, `--status` | Мониторинг (live) |
-| `-u`, `--uninstall` | Удаление |
-| `--update` | Обновление HA |
-| `--self-update` | Обновление скрипта |
-| `--self-test` | Самотест |
-| `--benchmark` | Тест производительности |
-| `--export-config` | Экспорт конфигурации |
-| `--history` | История запусков |
+### Режимы работы
+| Флаг | Описание |
+|------|----------|
+| `-c`, `--check` | Диагностика системы и проверка компонентов |
+| `-s`, `--status` | Мониторинг системы в реальном времени (Live) |
+| `--update` | Обновление OS-Agent и Home Assistant Supervised |
+| `--self-update` | Обновление самого скрипта до последней версии |
+| `--rescue` | Режим восстановления (авто-починка сети, Docker, ФС) |
+| `--benchmark` | Тест производительности железа |
+| `--uninstall` | Удаление HA (стандартное или полное) |
+| `--history` | История запусков скрипта |
 
 ### Опции установки
+| Флаг | Описание |
+|------|----------|
+| `--profile ИМЯ` | Выбор профиля (`minimal`, `standard`, `full`, `server`, `dev`) |
+| `--timezone ЗОНА` | Часовой пояс (напр. `Europe/Moscow`) |
+| `--data-dir ПУТЬ` | Перенести данные HA и Docker на внешний диск |
+| `--wifi SSID ПАРОЛЬ` | Настроить Wi-Fi в Quiet Mode |
+| `--swap РАЗМЕР` | Настроить swap (`zram`, `none`, или размер в МБ) |
+| `--tailscale` | Установить Tailscale VPN |
+| `--ts-authkey КЛЮЧ` | Tailscale Auth Key для автоматической авторизации |
+| `--restore-backup ФАЙЛ` | Восстановить бэкап `.tar.gz` после установки |
+| `--skip-update` | Пропустить `apt update/upgrade` |
+| `--dry-run` | Тестовый прогон без реальных изменений |
 
-| Опция | Пример | Описание |
-|-------|--------|----------|
-| `--profile` | `--profile standard` | Профиль установки |
-| `--timezone` | `--timezone Europe/Moscow` | Часовой пояс |
-| `--locale` | `--locale ru_RU.UTF-8` | Локаль |
-| `--data-dir` | `--data-dir /mnt/ssd` | Внешний диск |
-| `--restore-backup` | `--restore-backup /path/file.tar.gz` | Восстановить бэкап |
-| `--wifi` | `--wifi "SSID" "password"` | Настройка WiFi |
-| `--webhook` | `--webhook "https://ntfy.sh/topic"` | Webhook уведомления |
-| `--swap` | `--swap 2048` или `--swap zram` или `--swap none` | Настройка swap |
-| `--docker-mirror` | `--docker-mirror "https://mirror.gcr.io"` | Зеркало Docker |
-| `--auto-reboot` | | Авто-перезагрузка |
-| `--from-step` | `--from-step docker` | Продолжить с шага |
-| `--import-config` | `--import-config /path/config.sh` | Импорт конфига |
-| `--skip-update` | | Пропуск apt update |
-| `--dry-run` | | Без изменений |
-| `--silent` | | Тихий режим |
-| `--machine` | `--machine qemuarm-64` | Тип машины HA |
-| `--os-agent-ver` | `--os-agent-ver 1.6.0` | Версия OS-Agent |
-| `--ha-ver` | `--ha-ver 1.7.0` | Версия HA |
+### Примеры команд
 
-</details>
-
-## Шаги установки
-
-Установка состоит из 15 идемпотентных шагов. При сбое — повторный запуск продолжит с того места где остановился.
-
-| # | Шаг | Что делает |
-|---|-----|-----------|
-| 1 | Проверка | Система, RAM, диск, интернет, порты |
-| 2 | Обновление | apt update/upgrade, часовой пояс, WiFi |
-| 3 | Зависимости | Пакеты, swap |
-| 4 | Сеть | NetworkManager, статический IP |
-| 5 | AppArmor | Параметры загрузчика |
-| 6 | Производительность | ZRAM, CPU, eMMC, USB |
-| 7 | Docker | Установка, зеркало, внешний диск |
-| 8 | Версии | Определение последних версий |
-| 9 | Загрузка | .deb пакеты + SHA256 |
-| 10 | OS-Agent | Установка агента |
-| 11 | HA | Установка Home Assistant Supervised |
-| 12 | Безопасность | UFW, Fail2Ban, SSH, автообновления |
-| 13 | Утилиты | Watchdog, бэкапы, cron, мониторинг |
-| 14 | HACS | Магазин сообщества |
-| 15 | Восстановление | Бэкап (если указан) |
-
-## Утилиты
-
-Скрипт устанавливает набор утилит для обслуживания:
-
-| Утилита | Расписание | Что делает |
-|---------|-----------|-----------|
-| `ha-watchdog` | Каждые 5 мин | Проверяет HA, перезапускает при сбое |
-| `ha-cleanup` | 3:30 ночи | Очистка диска при нехватке места |
-| `ha-net-recovery` | Каждые 10 мин | Восстановление сети при обрыве |
-| `ha-thermal` | Каждые 5 мин | Уведомление при перегреве |
-| `ha-backup` | Воскресенье 4:00 | Бэкап конфигурации HA |
-| `ha-weekly-report` | Понедельник 9:00 | Еженедельный отчёт о состоянии |
-| `ha-boot-check` | При загрузке | Проверка после перезагрузки |
-| `ha-metrics` | Каждую минуту | Метрики Prometheus |
-
-## Уведомления
-
-Поддерживаются одновременно:
-
-| Способ | Как настроить |
-|--------|---------------|
-| **ntfy.sh** | `--webhook "https://ntfy.sh/тема"` (бесплатно, без регистрации) |
-| **Telegram** | Выбрать в мастере, ввести токен бота и Chat ID |
-| **Discord** | `--webhook "https://discord.com/api/webhooks/..."` |
-| **Любой webhook** | `--webhook "https://your-service.com/hook"` |
-
-## Файловая структура
-
-```
-/var/lib/ha-installer/         Конфиг, состояние, история
-/var/backups/homeassistant/    Бэкапы конфигурации HA
-/usr/local/bin/ha-*            Утилиты обслуживания
-/var/log/ha_install_*.log      Логи установки
-/etc/cron.d/ha-tools           Задания cron
-```
-
-## Устранение неполадок
-
-### Скрипт зависает
-
+**Тихая установка "Всё включено" с часовым поясом и VPN:**
 ```bash
-# Запустить с профилем (без wizard)
-sudo bash /tmp/install.sh --profile standard --timezone Europe/Moscow
+sudo bash install.sh --profile full --timezone Europe/Moscow --tailscale --ts-authkey tskey-auth-xxxxx
 ```
 
-### Нет сети после установки
-
+**Установка на внешний SSD с восстановлением бэкапа:**
 ```bash
-# Восстановить из бэкапа
-sudo cp /var/lib/ha-installer/backup/interfaces.bak /etc/network/interfaces
-sudo systemctl restart networking
+sudo bash install.sh --profile server --data-dir /mnt/ssd --restore-backup /mnt/usb/ha_backup.tar.gz
 ```
 
-### HA показывает "Unsupported"
+---
 
+## 🚑 Постустановочные утилиты
+
+Скрипт разворачивает набор утилит в `/usr/local/bin/` для удобного управления:
+
+- `ha-health` — Отчет о здоровье системы (RAM, Disk, CPU temp, контейнеры).
+- `ha-backup` — Создание полного бэкапа (через HA CLI, если доступен, или tar.gz конфига).
+- `ha-restore` — Интерактивное восстановление из бэкапа.
+- `ha-notify "текст"` — Отправка уведомления в Telegram/Webhook.
+- `ha-watchdog` — Проверяет доступность HA и перезапускает с экспоненциальной задержкой.
+- `ha-cleanup` — Очистка места на диске при нехватке.
+- `ha-thermal` — Проверка температуры (критично для TV-боксов).
+
+> Все утилиты автоматически интегрируются в `cron` (если включены в профиле) для регулярного выполнения.
+
+---
+
+## 🗑️ Удаление
+
+Для запуска удаления выполните:
 ```bash
-# Перезагрузить (для AppArmor)
-sudo reboot
-
-# Проверить drop-in
-cat /etc/systemd/system/hassio-supervisor.service.d/fix-os-release.conf
+sudo bash install.sh --uninstall
 ```
 
-### Место закончилось
+Скрипт предложит два режима:
+1. **Стандартный:** Удаляет HA, Supervisor, OS-Agent, контейнеры и утилиты. Оставляет Docker и сеть нетронутыми.
+2. **Полный:** Возвращает систему к состоянию до установки. Удаляет Docker, Tailscale, сбрасывает UFW, восстанавливает оригинальный `/etc/fstab`, hostname и настройки сети (ifupdown).
 
-```bash
-sudo ha-cleanup
-# или
-sudo docker system prune -af
-```
+---
 
-## Полная документация
+## 🐛 Устранение неисправностей (FAQ)
 
-Подробная документация по каждому шагу, настройке и устранению неполадок:
-**[docs/DOCUMENTATION.md](docs/DOCUMENTATION.md)**
+**В: После перезагрузки Home Assistant не запускается, в логах ошибка cgroups.**
+О: Убедитесь, что ядро поддерживает cgroups v2. На старых ядрах (4.x) может потребоваться ручное добавление параметров загрузки.
 
-## Лицензия
+**В: Tailscale установлен, но статус "Offline" или "Idle".**
+О: Выполните авторизацию вручную: `sudo tailscale up`. В терминале появится ссылка, которую нужно открыть в браузере.
 
-MIT License. Подробности в файле [LICENSE](LICENSE).
+**В: Локальный IP изменился, и я не могу зайти в HA.**
+О: Используйте mDNS: `http://homeassistant.local:8123` или подключитесь через Tailscale IP. Если скрипт ставился с профилем `server` и статическим IP, адрес не изменится.
 
-## Благодарности
+**В: Скрипт завис на шаге "Ожидание HA...".**
+О: Первая загрузка Home Assistant может занять 10-15 минут (скачивание образов Docker). Если прошло больше 20 минут, нажмите `Ctrl+C` и запустите скрипт с флагом `--rescue`.
 
-- [Home Assistant](https://www.home-assistant.io/) — платформа умного дома
-- [home-assistant/supervised-installer](https://github.com/home-assistant/supervised-installer) — официальный установщик
-- [home-assistant/os-agent](https://github.com/home-assistant/os-agent) — OS Agent
+---
+
+## 📄 Лицензия
+
+Этот проект распространяется под лицензией MIT. Используйте на свой страх и риск. Автор не несет ответственности за слетевшие конфиги на ваших TV-боксах! 😉
 ```
