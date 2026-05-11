@@ -3,10 +3,9 @@
 [![Bash Version](https://img.shields.io/badge/Bash-4%2B-blue)](https://www.gnu.org/software/bash/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-Ультимативный скрипт для установки **Home Assistant Supervised** на TV-приставки, одноплатники (SBC) и мини-ПК под управлением Armbian / Debian.
+Этот скрипт превращает любую ТВ-приставку (X96, Tanix, HK1 на Amlogic/Allwinner), одноплатный компьютер (Raspberry Pi, Odroid) или обычный мини-ПК в полноценный, защищенный и отказоустойчивый сервер Home Assistant Supervised.
 
-Этот скрипт не просто устанавливает HA. Он превращает "голую" систему в защищенный, оптимизированный и отказоустойчивый сервер умного дома с автоматическим откатом при ошибках.
-
+Установка HA Supervised на нестандартное железо — сложный процесс, связанный с проблемами в ОС, сетью, AppArmor и обрывами SSH. Этот скрипт решает все проблемы автоматически: от подмены os-release и патча загрузчика до защиты сессии SSH и авто-отката сети.
 ## ⚠️ Важное предупреждение
 
 Скрипт вносит изменения в сетевой стек (переключает на NetworkManager), ядро (AppArmor) и файрвол. **Обязательно имейте физический доступ (монитор/клавиатура) или UART-подключение к устройству на случай обрыва сети по SSH.** Скрипт имеет систему отката, но 100% гарантию на всех китайских TV-боксах дать невозможно.
@@ -41,8 +40,8 @@
 Самый простой способ запустить установщик — использовать интерактивный мастер:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iRespect777/HAS-tvbox/refs/heads/main/ha-installer/install.sh -o /tmp/install.sh
-sudo bash /tmp/install.sh
+curl -fsSL https://raw.githubusercontent.com/iRespect777/HAS-tvbox/refs/heads/main/ha-installer/install.sh
+sudo bash install.sh
 ```
 Мастер проведет вас через выбор профиля, настройку сети, часового пояса и дополнительных компонентов.
 
