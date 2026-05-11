@@ -2866,10 +2866,12 @@ detect_boot_dir() {
         msg_warn "Файлы загрузчика не найдены в ${BOOT_DEV_FSTAB}"
         umount "$BOOT_DIR" 2>/dev/null || true
         BOOT_DIR=""
+        BOOT_DEV_FSTAB="" # ВАЖНО: сбрасываем, чтобы не добавить в fstab
       fi
     else
       msg_error "Не удалось примонтировать ${BOOT_DEV_FSTAB}"
       BOOT_DIR=""
+      BOOT_DEV_FSTAB="" # ВАЖНО: сбрасываем
     fi
   fi
 
@@ -2893,7 +2895,7 @@ detect_boot_dir() {
     return 0
   fi
 
-  # 3. Поиск ОТМОНТИРОВАННЫХ партиций (разрешение конфликтов SD vs eMMC)
+  # 3. Поиск ОТМОНТИРОВАННЫХ партиций (безопасный парсинг lsblk)
   msg_dim "Загрузчик не найден на диске. Поиск отмонтированных партиций..."
   
   local root_dev root_disk
@@ -2904,29 +2906,33 @@ detect_boot_dir() {
 
   declare -a BOOT_CANDIDATES=()
   
-  while IFS= read -r line; do
-    local dev fstype label mnt pkname
-    dev=$(echo "$line" | awk '{print $1}')
-    fstype=$(echo "$line" | awk '{print $2}')
-    label=$(echo "$line" | awk '{print $3}')
-    mnt=$(echo "$line" | awk '{print $4}')
-    pkname=$(echo "$line" | awk '{print $5}')
+  # Парсим только NAME, FSTYPE, MOUNTPOINT (в них нет пробелов)
+  while IFS=' ' read -r dev fstype mnt; do
+    # Пропускаем примонтированные, своп и пустые
+    [ -n "$mnt" ] && continue
+    [ "$fstype" = "swap" ] && continue
+    [ -z "$fstype" ] && continue
     
-    # Если партиция не смонтирована и похожа на загрузчик
-    if [ "$mnt" = " " ] || [ -z "$mnt" ]; then
-      if [[ "$label" =~ [Bb][Oo][Oo][Tt] ]] || [[ "$label" =~ [Aa][Rr][Mm] ]] || [ "$fstype" = "vfat" ] || [ "$fstype" = "ext4" ]; then
-        if [ "$fstype" != "swap" ] && [ ${#dev} -lt 20 ]; then
-          local hint=""
-          if [ "$pkname" = "$root_disk" ]; then
-            hint="(Тот же диск, что и корень /)"
-          else
-            hint="(Другой диск: возможно SD-карта)"
-          fi
-          BOOT_CANDIDATES+=("$dev" "$fstype $label $hint")
-        fi
+    # Запрашиваем LABEL отдельной командой (защита от пробелов)
+    local label
+    label=$(lsblk -nlo LABEL "$dev" 2>/dev/null)
+    
+    # Фильтруем по меткам и ФС
+    if [[ "$label" =~ [Bb][Oo][Oo][Tt] ]] || [[ "$label" =~ [Aa][Rr][Mm] ]] || [ "$fstype" = "vfat" ] || [ "$fstype" = "ext4" ]; then
+      local pkname
+      pkname=$(lsblk -nlo PKNAME "$dev" 2>/dev/null)
+      
+      local hint=""
+      if [ "$pkname" = "$root_disk" ]; then
+        hint="(Тот же диск, что и корень /)"
+      else
+        hint="(Другой диск: возможно SD-карта)"
       fi
+      
+      # Добавляем в массив кандидатов
+      BOOT_CANDIDATES+=("$dev" "$fstype $label $hint")
     fi
-  done < <(lsblk -lnpo NAME,FSTYPE,LABEL,MOUNTPOINT,PKNAME 2>/dev/null)
+  done < <(lsblk -lnpo NAME,FSTYPE,MOUNTPOINT 2>/dev/null)
 
   if [ ${#BOOT_CANDIDATES[@]} -eq 0 ]; then
     BOOT_DIR="/boot"
@@ -2984,9 +2990,13 @@ detect_boot_dir() {
       else
         msg_warn "Файлы загрузчика не найдены в ${selected_dev}"
         umount "$BOOT_DIR" 2>/dev/null || true
+        BOOT_DIR=""
+        BOOT_DEV_FSTAB="" # ВАЖНО: сбрасываем
       fi
     else
       msg_error "Не удалось примонтировать ${selected_dev}"
+      BOOT_DIR=""
+      BOOT_DEV_FSTAB="" # ВАЖНО: сбрасываем
     fi
   fi
 
@@ -3073,12 +3083,13 @@ step_configure_apparmor() {
           
           local dev_uuid
           dev_uuid=$(blkid -s UUID -o value "$BOOT_DEV_FSTAB" 2>/dev/null)
+          
+          # ВАЖНО: Добавляем ТОЛЬКО по UUID. Добавление по /dev/mmcblkX на ARM небезопасно!
           if [ -n "$dev_uuid" ]; then
             echo "UUID=$dev_uuid $mount_point $fstype defaults,noatime 0 2" >> /etc/fstab
             msg_ok "Партиция добавлена в fstab (монтируется в $mount_point)"
           else
-            echo "$BOOT_DEV_FSTAB $mount_point $fstype defaults,noatime 0 2" >> /etc/fstab
-            msg_ok "Партиция добавлена в fstab по имени устройства"
+            msg_warn "Не удалось определить UUID $BOOT_DEV_FSTAB. Пропуск добавления в fstab (небезопасно)"
           fi
         else
           msg_dim "Партиция уже присутствует в fstab"
