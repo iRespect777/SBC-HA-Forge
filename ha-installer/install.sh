@@ -1594,11 +1594,18 @@ setup_wifi() {
     return 0
   fi
 
-  # 3. Явно прописываем тип шифрования (WPA2) и пароль.
-  # Это НАДЕЖНЕЕ, чем передавать пароль через команду "connect", так как
-  # защищает от ломания спецсимволов в пароле (!, @, #, $, пробелы и т.д.)
-  if [ -n "$OPT_WIFI_PASS" ]; then
-    nmcli con modify "$OPT_WIFI_SSID" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$OPT_WIFI_PASS" >/dev/null 2>&1
+  # 3. Получаем UUID созданного подключения для надежной модификации.
+  # Флаг -g (--get-fields) безопасно извлекает поле, даже если SSID содержит двоеточия или пробелы.
+  local wifi_uuid
+  wifi_uuid=$(nmcli -g UUID con show "$OPT_WIFI_SSID" 2>/dev/null)
+  
+  # Если профиль по имени не нашелся (имя исказилось), берем UUID активного Wi-Fi устройства
+  if [ -z "$wifi_uuid" ] && [ -n "$wifi_dev" ]; then
+    wifi_uuid=$(nmcli -g GENERAL.CON-UUID dev show "$wifi_dev" 2>/dev/null)
+  fi
+
+  if [ -n "$OPT_WIFI_PASS" ] && [ -n "$wifi_uuid" ]; then
+    nmcli con modify "$wifi_uuid" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$OPT_WIFI_PASS" >/dev/null 2>&1
   fi
 
   # 4. Поднимаем соединение
