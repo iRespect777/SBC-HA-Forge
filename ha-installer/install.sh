@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
 # Home Assistant Supervised - ULTIMATE INSTALLER
-# Version: 9.9.8
+# Version: 9.9.9
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/HAS-tvbox
@@ -16,7 +16,7 @@ if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
 fi
 
-readonly SCRIPT_VERSION="9.9.8"
+readonly SCRIPT_VERSION="9.9.9"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly INSTALLER_REPO="mediahome/ha-installer"
 readonly HA_INSTALLER_DIR="/var/lib/ha-installer"
@@ -68,6 +68,7 @@ STATIC_IP=""; STATIC_GW=""; STATIC_DNS=""
 TG_TOKEN=""; TG_CHAT=""
 TS_AUTHKEY=""; REMOTE_BACKUP_TARGET=""
 BOOT_DIR=""
+BOOT_DEV_FSTAB=""
 SKIP_UPDATE=false; CHECK_ONLY=false; UNINSTALL=false
 DRY_RUN=false; SILENT=false; SHOW_STATUS=false
 DO_UPDATE=false; DO_SELF_TEST=false; DO_SELF_UPDATE=false
@@ -360,6 +361,7 @@ OPT_LOCALE="${OPT_LOCALE}"
 OPT_TAILSCALE=${OPT_TAILSCALE}
 PROFILE="${PROFILE}"
 BOOT_DIR="${BOOT_DIR}"
+BOOT_DEV_FSTAB="${BOOT_DEV_FSTAB}"
 EOF
   chmod 600 "$HA_CONFIG_FILE"
 }
@@ -379,7 +381,7 @@ load_config() {
         OS_RELEASE_FAKED|OPT_ZRAM|OPT_UFW|OPT_WATCHDOG|\
         OPT_THERMAL|OPT_BACKUP|OPT_HACS|OPT_MONITORING|PROFILE|\
         OPT_DATA_DIR|OPT_TIMEZONE|OPT_WEBHOOK_URL|OPT_SWAP_SIZE|\
-        OPT_DOCKER_MIRROR|OPT_AUTO_REBOOT|OPT_LOCALE|OPT_TAILSCALE|BOOT_DIR)
+        OPT_DOCKER_MIRROR|OPT_AUTO_REBOOT|OPT_LOCALE|OPT_TAILSCALE|BOOT_DIR|BOOT_DEV_FSTAB)
           printf -v "$key" '%s' "$val"
           ;;
       esac
@@ -2083,12 +2085,12 @@ run_wizard() {
 
   # Boot directory
   if [ "$HAS_WHIPTAIL" = true ]; then
-    if ! whiptail --title "Раздел загрузчика" --yesno "Использовать автоопределение каталога загрузчика?\n\n(Выберите 'Нет', если у вас TV-box и загрузчик примонтирован не в /boot, например в /media/boot)" 12 65; then
-      BOOT_DIR=$(_whip_input "Путь к загрузчику" "Куда примонтирован раздел с armbianEnv.txt или extlinux.conf" "/boot") || BOOT_DIR=""
+    if ! whiptail --title "Раздел загрузчика" --yesno "Использовать автоопределение каталога загрузчика?\n\n(Выберите 'Нет', если у вас TV-box с двумя накопителями (SD+eMMC) или загрузчик не монтируется автоматически)" 12 65; then
+      BOOT_DEV_FSTAB=$(_whip_input "Устройство загрузчика" "Укажите путь к партиции (например, /dev/mmcblk0p1)" "") || BOOT_DEV_FSTAB=""
     fi
   else
-    if ! text_yesno "Автоопределение загрузчика (/boot)?" "y"; then
-      BOOT_DIR=$(text_input "Путь к каталогу загрузчика" "/boot")
+    if ! text_yesno "Автоопределение загрузчика?" "y"; then
+      BOOT_DEV_FSTAB=$(text_input "Устройство партиции загрузчика (напр. /dev/mmcblk0p1)" "")
     fi
   fi
   
@@ -2848,23 +2850,41 @@ step_configure_network() {
 # BOOT DIR DETECTION
 # ============================================================================
 detect_boot_dir() {
-  # Если уже задан через CLI, Wizard или загружен из конфига — пропускаем
+  # Если каталог уже задан — пропускаем
   [ -n "$BOOT_DIR" ] && return 0
 
-  # 1. Проверяем стандартные точки монтирования
+  # Если задано блочное устройство (из CLI или Wizard) — монтируем его
+  if [ -n "$BOOT_DEV_FSTAB" ] && [ -z "$BOOT_DIR" ]; then
+    BOOT_DIR="/mnt/ha_boot_tmp"
+    mkdir -p "$BOOT_DIR"
+    msg_action "Монтирование указанного загрузчика ${BOOT_DEV_FSTAB}..."
+    if mount "$BOOT_DEV_FSTAB" "$BOOT_DIR" 2>/dev/null; then
+      if [ -f "$BOOT_DIR/armbianEnv.txt" ] || [ -f "$BOOT_DIR/uEnv.txt" ] || [ -f "$BOOT_DIR/extlinux/extlinux.conf" ]; then
+        msg_ok "Загрузчик найден и примонтирован"
+        return 0
+      else
+        msg_warn "Файлы загрузчика не найдены в ${BOOT_DEV_FSTAB}"
+        umount "$BOOT_DIR" 2>/dev/null || true
+        BOOT_DIR=""
+      fi
+    else
+      msg_error "Не удалось примонтировать ${BOOT_DEV_FSTAB}"
+      BOOT_DIR=""
+    fi
+  fi
+
+  # 1. Проверяем стандартные примонтированные точки
   for dir in /boot /boot/firmware /media/boot /mnt/boot; do
-    # Ищем хотя бы один из конфигов загрузчика
     if [ -d "$dir" ] && { [ -f "$dir/armbianEnv.txt" ] || [ -f "$dir/uEnv.txt" ] || [ -f "$dir/extlinux/extlinux.conf" ]; }; then
       BOOT_DIR="$dir"
       return 0
     fi
   done
 
-  # 2. Поиск по всему диску (если примонтировано в необычное место)
+  # 2. Поиск по всей примонтированной ФС
   local found
   found=$(find / -maxdepth 3 -type f \( -name "armbianEnv.txt" -o -name "extlinux.conf" \) 2>/dev/null | head -1)
   if [ -n "$found" ]; then
-    # Если нашли extlinux.conf, каталогом считается родительский (обычно /boot)
     if [[ "$found" == *"/extlinux/"* ]]; then
       BOOT_DIR=$(dirname "$(dirname "$found")")
     else
@@ -2873,7 +2893,104 @@ detect_boot_dir() {
     return 0
   fi
 
-  # 3. Fallback — предполагаем стандартный /boot
+  # 3. Поиск ОТМОНТИРОВАННЫХ партиций (разрешение конфликтов SD vs eMMC)
+  msg_dim "Загрузчик не найден на диске. Поиск отмонтированных партиций..."
+  
+  local root_dev root_disk
+  root_dev=$(findmnt -n -o SOURCE / 2>/dev/null)
+  if [ -n "$root_dev" ]; then
+    root_disk=$(lsblk -nlo PKNAME "$root_dev" 2>/dev/null)
+  fi
+
+  declare -a BOOT_CANDIDATES=()
+  
+  while IFS= read -r line; do
+    local dev fstype label mnt pkname
+    dev=$(echo "$line" | awk '{print $1}')
+    fstype=$(echo "$line" | awk '{print $2}')
+    label=$(echo "$line" | awk '{print $3}')
+    mnt=$(echo "$line" | awk '{print $4}')
+    pkname=$(echo "$line" | awk '{print $5}')
+    
+    # Если партиция не смонтирована и похожа на загрузчик
+    if [ "$mnt" = " " ] || [ -z "$mnt" ]; then
+      if [[ "$label" =~ [Bb][Oo][Oo][Tt] ]] || [[ "$label" =~ [Aa][Rr][Mm] ]] || [ "$fstype" = "vfat" ] || [ "$fstype" = "ext4" ]; then
+        if [ "$fstype" != "swap" ] && [ ${#dev} -lt 20 ]; then
+          local hint=""
+          if [ "$pkname" = "$root_disk" ]; then
+            hint="(Тот же диск, что и корень /)"
+          else
+            hint="(Другой диск: возможно SD-карта)"
+          fi
+          BOOT_CANDIDATES+=("$dev" "$fstype $label $hint")
+        fi
+      fi
+    fi
+  done < <(lsblk -lnpo NAME,FSTYPE,LABEL,MOUNTPOINT,PKNAME 2>/dev/null)
+
+  if [ ${#BOOT_CANDIDATES[@]} -eq 0 ]; then
+    BOOT_DIR="/boot"
+    return 0
+  fi
+
+  local selected_dev=""
+
+  # Если кандидат ровно один - используем его
+  if [ ${#BOOT_CANDIDATES[@]} -eq 2 ]; then
+    selected_dev="${BOOT_CANDIDATES[0]}"
+  else
+    # Если кандидатов несколько (SD + eMMC) - СПРАШИВАЕМ
+    msg_warn "Обнаружено несколько партиций с загрузчиком!"
+    msg_dim "Корень системы (/) находится на: ${root_dev:-неизвестно}"
+    
+    if [ "$SILENT" != true ] && [ -t 0 ]; then
+      if command -v whiptail &>/dev/null; then
+        selected_dev=$(whiptail --title "Выбор загрузчика" --menu \
+          "Система загрузилась с одного из этих разделов.\nВыберите ТОТ, с которого происходит загрузка:" \
+          20 70 ${#BOOT_CANDIDATES[@]} "${BOOT_CANDIDATES[@]}" 3>&1 1>&2 2>&3) || selected_dev=""
+      else
+        echo -e "\n   ${BOLD}Обнаружены кандидаты на загрузчик:${NC}" >&2
+        local i=1
+        while [ $i -lt ${#BOOT_CANDIDATES[@]} ]; do
+          echo -e "   ${CYAN}$((i/2+1)))${NC} ${BOOT_CANDIDATES[$((i-1))]} - ${BOOT_CANDIDATES[$i]}" >&2
+          i=$((i+2))
+        done
+        echo -en "\n   ${ARROW} Введите номер: " >&2
+        local choice; read -r choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le $(( ${#BOOT_CANDIDATES[@]}/2 )) ]; then
+          selected_dev="${BOOT_CANDIDATES[$(( (choice-1)*2 ))]}"
+        fi
+      fi
+    fi
+    
+    if [ -z "$selected_dev" ]; then
+      msg_warn "Автоматический выбор: ${BOOT_CANDIDATES[0]}"
+      selected_dev="${BOOT_CANDIDATES[0]}"
+    fi
+  fi
+
+  # Монтируем выбранное устройство
+  if [ -n "$selected_dev" ]; then
+    msg_ok "Выбран раздел загрузчика: ${selected_dev}"
+    BOOT_DIR="/mnt/ha_boot_tmp"
+    mkdir -p "$BOOT_DIR"
+    
+    msg_action "Временное монтирование ${selected_dev} в ${BOOT_DIR}..."
+    if mount "$selected_dev" "$BOOT_DIR" 2>/dev/null; then
+      if [ -f "$BOOT_DIR/armbianEnv.txt" ] || [ -f "$BOOT_DIR/uEnv.txt" ] || [ -f "$BOOT_DIR/extlinux/extlinux.conf" ]; then
+        msg_ok "Загрузчик найден и примонтирован"
+        BOOT_DEV_FSTAB="$selected_dev"
+        return 0
+      else
+        msg_warn "Файлы загрузчика не найдены в ${selected_dev}"
+        umount "$BOOT_DIR" 2>/dev/null || true
+      fi
+    else
+      msg_error "Не удалось примонтировать ${selected_dev}"
+    fi
+  fi
+
+  # 4. Fallback
   BOOT_DIR="/boot"
 }
 
@@ -2909,7 +3026,7 @@ step_configure_apparmor() {
     [ -f "${BOOT_DIR}/uEnv.txt" ] && boot_files+=("${BOOT_DIR}/uEnv.txt")
     [ -f "${BOOT_DIR}/extlinux/extlinux.conf" ] && boot_files+=("${BOOT_DIR}/extlinux/extlinux.conf")
 
-    # Если файлы не найдены даже после автоопределения, пытаемся искать в /boot как фоллбэк
+    # Если файлы не найдены, пытаемся искать в /boot как фоллбэк
     if [ ${#boot_files[@]} -eq 0 ] && [ "$BOOT_DIR" != "/boot" ]; then
         msg_warn "Конфиги не найдены в ${BOOT_DIR}, проверяем /boot..."
         BOOT_DIR="/boot"
@@ -2940,10 +3057,40 @@ step_configure_apparmor() {
         patched=true
     done
 
+    # Если загрузчик был примонтирован временно, добавляем партицию в fstab
+    if [ -n "$BOOT_DEV_FSTAB" ]; then
+      local fstype
+      fstype=$(lsblk -nlo FSTYPE "$BOOT_DEV_FSTAB" 2>/dev/null | head -1)
+      
+      if [ -n "$fstype" ]; then
+        msg_action "Добавляем партицию загрузчика в /etc/fstab для монтирования при старте..."
+        if ! grep -q "$BOOT_DEV_FSTAB" /etc/fstab 2>/dev/null; then
+          local mount_point="/boot"
+          if grep -q " /boot " /etc/fstab 2>/dev/null; then
+            mount_point="/media/boot"
+            mkdir -p "$mount_point"
+          fi
+          
+          local dev_uuid
+          dev_uuid=$(blkid -s UUID -o value "$BOOT_DEV_FSTAB" 2>/dev/null)
+          if [ -n "$dev_uuid" ]; then
+            echo "UUID=$dev_uuid $mount_point $fstype defaults,noatime 0 2" >> /etc/fstab
+            msg_ok "Партиция добавлена в fstab (монтируется в $mount_point)"
+          else
+            echo "$BOOT_DEV_FSTAB $mount_point $fstype defaults,noatime 0 2" >> /etc/fstab
+            msg_ok "Партиция добавлена в fstab по имени устройства"
+          fi
+        else
+          msg_dim "Партиция уже присутствует в fstab"
+        fi
+      else
+        msg_warn "Не удалось определить ФС для fstab"
+      fi
+    fi
+
     if [ "$patched" != true ]; then
         msg_error "Конфиг загрузчика не найден!"
         msg_dim "AppArmor не будет активен. HA может работать с предупреждениями."
-        msg_dim "Добавьте вручную в параметры загрузки: apparmor=1 security=apparmor"
         mark_done "$sid"
         return 0
     fi
@@ -2991,7 +3138,7 @@ step_configure_apparmor() {
                     exit 0
                 else
                     msg_error "Не удалось настроить продолжение"
-                    msg_info "Перезагрузите вручную и запустите:"
+                    msg_info "Перезагрузите вручную и запустите скрипт снова:"
                     msg_dim "  sudo reboot"
                     msg_dim "  sudo bash ${SAFE_SCRIPT_PATH:-$0} --from-step=apparmor"
                     exit 1
@@ -5867,6 +6014,8 @@ parse_args() {
       --ts-authkey=*)        TS_AUTHKEY="${1#*=}";;
       --boot-dir)           shift; [ $# -eq 0 ] && { msg_error "--boot-dir ?"; exit 1; }; BOOT_DIR="$1";;
       --boot-dir=*)         BOOT_DIR="${1#*=}";;
+      --boot-dev)           shift; [ $# -eq 0 ] && { msg_error "--boot-dev ?"; exit 1; }; BOOT_DEV_FSTAB="$1";;
+      --boot-dev=*)         BOOT_DEV_FSTAB="${1#*=}";;
       *)                    msg_error "Неизвестная опция: $1"; show_help; exit 1;;
     esac
     shift
