@@ -1979,87 +1979,52 @@ run_wizard() {
   CF_TUNNEL_TOKEN=""
 
   # =============================================
-  # STEP 1: MODE (quick or advanced)
+  # STEP 1: PROFILE
   # =============================================
-  local wizard_mode=""
+  local prof_title="Профиль"
+  [ -n "$BENCH_VERDICT" ] && [ "$BENCH_VERDICT" != "" ] && prof_title="Профиль (рекомендуется: ${BENCH_VERDICT})"
   if [ "$HAS_WHIPTAIL" = true ]; then
-    wizard_mode=$(_whip_menu "Режим установки" \
-      "quick"    "Быстрый (3 шага: профиль + пояс + старт)" \
-      "advanced" "Расширенный (все настройки)")
-    [ $? -ne 0 ] && return 1
+    prof=$(_whip_menu "$prof_title" \
+      "minimal"  "Только HA + Docker (без доп. компонентов)" \
+      "standard" "Рекомендуемый (файрвол, бэкапы, watchdog)" \
+      "full"     "Полный (+ мониторинг Prometheus)" \
+      "server"   "Сервер (+ стат. IP + мониторинг)" \
+      "dev"      "Разработчик (HA + HACS, без оптимизаций)" \
+      "custom"   "Выбрать компоненты вручную")
+    [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
   else
-    wizard_mode=$(text_menu "Режим установки" "Выберите:" \
-      "quick" "Быстрый (3 шага)" "advanced" "Расширенный") || return 1
+    prof=$(text_menu "$prof_title" "Выберите:" \
+      "minimal" "Только HA" "standard" "Рекомендуемый" "full" "Полный" \
+      "server" "Сервер" "dev" "Разработчик" "custom" "Вручную") || { _wizard_cancelled && return 1 || exit 0; }
   fi
 
-  # =============================================
-  # STEP 2: PROFILE
-  # =============================================
-  if [ "$wizard_mode" = "quick" ]; then
-    # Quick: only presets, no custom
-    local prof_title="Профиль"
-    [ -n "$BENCH_VERDICT" ] && [ "$BENCH_VERDICT" != "" ] && prof_title="Профиль (рекомендуется: ${BENCH_VERDICT})"
+  if [ "$prof" = "custom" ]; then
+    _wizard_select_components || { _wizard_cancelled && return 1 || exit 0; }
+
+    # Custom-specific: locale
+    curloc=$(locale 2>/dev/null | awk -F= '/^LANG=/{print $2}') || curloc="C.UTF-8"
     if [ "$HAS_WHIPTAIL" = true ]; then
-      prof=$(_whip_menu "$prof_title" \
-        "minimal"  "Только HA + Docker (без доп. компонентов)" \
-        "standard" "Рекомендуемый (файрвол, бэкапы, watchdog)" \
-        "full"     "Полный (+ мониторинг Prometheus)" \
-        "server"   "Сервер (+ стат. IP + мониторинг)" \
-        "dev"      "Разработчик (HA + HACS, без оптимизаций)")
-      [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
+      if whiptail --title "Локаль" --yesno "Сменить локаль?\nТекущая: ${curloc}" 10 50 --defaultno 2>/dev/null; then
+        OPT_LOCALE=$(_whip_input "Локаль" "Например: ru_RU.UTF-8" "$curloc") || OPT_LOCALE=""
+      fi
     else
-      prof=$(text_menu "$prof_title" "Выберите:" \
-        "minimal" "Только HA" "standard" "Рекомендуемый" "full" "Полный" \
-        "server" "Сервер" "dev" "Разработчик") || { _wizard_cancelled && return 1 || exit 0; }
+      text_yesno "Сменить локаль? (${curloc})" "n" && OPT_LOCALE=$(text_input "Локаль" "$curloc")
     fi
+
+    # Custom-specific: docker mirror
+    if [ "$HAS_WHIPTAIL" = true ]; then
+      if whiptail --title "Зеркало Docker" --yesno "Использовать зеркало?\n(Если Docker Hub заблокирован)" 10 55 --defaultno 2>/dev/null; then
+        OPT_DOCKER_MIRROR=$(_whip_input "URL зеркала" "" "") || OPT_DOCKER_MIRROR=""
+      fi
+    else
+      text_yesno "Зеркало Docker? (если заблокирован)" "n" && OPT_DOCKER_MIRROR=$(text_input "URL" "")
+    fi
+  else
     apply_profile "$prof"
-  else
-    # Advanced: presets + custom
-    local prof_title="Профиль"
-    [ -n "$BENCH_VERDICT" ] && [ "$BENCH_VERDICT" != "" ] && prof_title="Профиль (рекомендуется: ${BENCH_VERDICT})"
-    if [ "$HAS_WHIPTAIL" = true ]; then
-      prof=$(_whip_menu "$prof_title" \
-        "minimal"  "Только HA + Docker" \
-        "standard" "Рекомендуемый (файрвол, бэкапы, watchdog)" \
-        "full"     "Полный (+ мониторинг)" \
-        "server"   "Сервер (+ стат. IP)" \
-        "dev"      "Разработчик" \
-        "custom"   "Выбрать компоненты вручную")
-      [ $? -ne 0 ] && { _wizard_cancelled && return 1 || exit 0; }
-    else
-      prof=$(text_menu "$prof_title" "Выберите:" \
-        "minimal" "Только HA" "standard" "Рекомендуемый" "full" "Полный" \
-        "server" "Сервер" "dev" "Разработчик" "custom" "Вручную") || { _wizard_cancelled && return 1 || exit 0; }
-    fi
-
-    if [ "$prof" = "custom" ]; then
-      _wizard_select_components || { _wizard_cancelled && return 1 || exit 0; }
-
-      # Custom-specific: locale
-      curloc=$(locale 2>/dev/null | awk -F= '/^LANG=/{print $2}') || curloc="C.UTF-8"
-      if [ "$HAS_WHIPTAIL" = true ]; then
-        if whiptail --title "Локаль" --yesno "Сменить локаль?\nТекущая: ${curloc}" 10 50 --defaultno 2>/dev/null; then
-          OPT_LOCALE=$(_whip_input "Локаль" "Например: ru_RU.UTF-8" "$curloc") || OPT_LOCALE=""
-        fi
-      else
-        text_yesno "Сменить локаль? (${curloc})" "n" && OPT_LOCALE=$(text_input "Локаль" "$curloc")
-      fi
-
-      # Custom-specific: docker mirror
-      if [ "$HAS_WHIPTAIL" = true ]; then
-        if whiptail --title "Зеркало Docker" --yesno "Использовать зеркало?\n(Если Docker Hub заблокирован)" 10 55 --defaultno 2>/dev/null; then
-          OPT_DOCKER_MIRROR=$(_whip_input "URL зеркала" "" "") || OPT_DOCKER_MIRROR=""
-        fi
-      else
-        text_yesno "Зеркало Docker? (если заблокирован)" "n" && OPT_DOCKER_MIRROR=$(text_input "URL" "")
-      fi
-    else
-      apply_profile "$prof"
-    fi
   fi
 
   # =============================================
-  # STEP 3: TIMEZONE
+  # STEP 2: TIMEZONE
   # =============================================
   curtz=$(timedatectl 2>/dev/null | awk '/Time zone/{print $3}') || curtz="UTC"
   if [ "$HAS_WHIPTAIL" = true ]; then
@@ -2071,25 +2036,7 @@ run_wizard() {
   OPT_TIMEZONE="${OPT_TIMEZONE:-$curtz}"
 
   # =============================================
-  # QUICK: confirm and done
-  # =============================================
-  if [ "$wizard_mode" = "quick" ]; then
-    local qs="Быстрая установка:\n\n"
-    qs+="  Профиль:      ${PROFILE}\n"
-    qs+="  Часовой пояс: ${OPT_TIMEZONE}\n"
-    qs+="\nВсе остальные настройки — по умолчанию.\nНачать установку?"
-    if [ "$HAS_WHIPTAIL" = true ]; then
-      whiptail --title "Подтверждение" --yesno "$qs" 14 55 && return 0
-      _wizard_cancelled && return 1 || exit 0
-    else
-      echo -e "\n$qs" >&2
-      text_yesno "Начать?" "y" && return 0
-      _wizard_cancelled && return 1 || exit 0
-    fi
-  fi
-
-  # =============================================
-  # ADVANCED: all options
+  # ALL OPTIONS (бывший ADVANCED)
   # =============================================
 
   # Boot directory
