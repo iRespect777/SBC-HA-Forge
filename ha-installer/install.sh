@@ -2325,26 +2325,26 @@ run_wizard() {
   # CONFIRMATION
   # =============================================
   local s="Установка Home Assistant Supervised\n\n"
-  s+="  Профиль:        ${PROFILE}\n"
-  s+="  Часовой пояс:   ${OPT_TIMEZONE}\n"
-  s+="  Swap:           ${OPT_SWAP_SIZE:-zram}\n"
-  [ -n "$OPT_DATA_DIR" ]          && s+="  Данные:         ${OPT_DATA_DIR}\n"
-  [ -n "$OPT_WIFI_SSID" ]         && s+="  WiFi:           ${OPT_WIFI_SSID}\n"
+  s+="  Профиль:      ${PROFILE}\n"
+  s+="  Часовой пояс: ${OPT_TIMEZONE}\n"
+  s+="  Swap:         ${OPT_SWAP_SIZE:-zram}\n"
+  [ -n "$OPT_DATA_DIR" ]          && s+="  Данные:       ${OPT_DATA_DIR}\n"
+  [ -n "$OPT_WIFI_SSID" ]         && s+="  WiFi:         ${OPT_WIFI_SSID}\n"
   [ -n "$OPT_DOCKER_MIRROR" ]     && s+="  Зеркало Docker: да\n"
-  [ -n "$OPT_RESTORE_BACKUP" ]    && s+="  Восст. бэкапа:  $(basename "$OPT_RESTORE_BACKUP")\n"
-  [ -n "$OPT_LOCALE" ]            && s+="  Локаль:         ${OPT_LOCALE}\n"
-  [ "$OPT_AUTO_REBOOT" = true ]   && s+="  Перезагрузка:   авто\n"
-  [ "$OPT_STATIC_IP" = true ]     && s+="  Стат. IP:       ${STATIC_IP}\n"
-  [ "$OPT_TAILSCALE" = true ]     && s+="  Tailscale:      да\n"
-  [ "$OPT_CLOUDFLARED" = true ]   && s+="  Cloudflare:     да\n"
-  [ -n "$BOOT_DEV_FSTAB" ]        && s+="  Загрузчик:      ${BOOT_DEV_FSTAB}\n"
-  [ "$OPT_TELEGRAM" = true ]      && s+="  Telegram:       да\n"
-  [ -n "$OPT_WEBHOOK_URL" ]       && s+="  Webhook:        да\n"
-  s+="\nНачать установку?\n(Нет = вернуться в меню)"
+  [ -n "$OPT_RESTORE_BACKUP" ]    && s+="  Бэкап:        $(basename "$OPT_RESTORE_BACKUP")\n"
+  [ -n "$OPT_LOCALE" ]            && s+="  Локаль:       ${OPT_LOCALE}\n"
+  [ "$OPT_AUTO_REBOOT" = true ]   && s+="  Перезагрузка: авто\n"
+  [ "$OPT_STATIC_IP" = true ]     && s+="  Стат. IP:     ${STATIC_IP}\n"
+  [ "$OPT_TAILSCALE" = true ]     && s+="  Tailscale:    да\n"
+  [ "$OPT_CLOUDFLARED" = true ]   && s+="  Cloudflare:   да\n"
+  [ -n "$BOOT_DEV_FSTAB" ]        && s+="  Загрузчик:    ${BOOT_DEV_FSTAB}\n"
+  [ "$OPT_TELEGRAM" = true ]      && s+="  Telegram:     да\n"
+  [ -n "$OPT_WEBHOOK_URL" ]       && s+="  Webhook:      да\n"
+  s+="\nНачать установку? (Нет = вернуться в меню)"
 
   if [ "$HAS_WHIPTAIL" = true ]; then
-    # Увеличены размеры окна: высота 35 строк, ширина 75 символов
-    whiptail --title "Подтверждение" --yesno "$s" 35 75 && return 0
+    # Безопасный размер: 22 строки высотой, 70 символов шириной. Влезет в любой SSH.
+    whiptail --title "Подтверждение" --yesno "$s" 22 70 && return 0
     _wizard_cancelled && return 1 || exit 0
   else
     echo -e "\n$s" >&2
