@@ -2328,23 +2328,49 @@ run_wizard() {
   s+="  Профиль:      ${PROFILE}\n"
   s+="  Часовой пояс: ${OPT_TIMEZONE}\n"
   s+="  Swap:         ${OPT_SWAP_SIZE:-zram}\n"
-  [ -n "$OPT_DATA_DIR" ]          && s+="  Данные:       ${OPT_DATA_DIR}\n"
-  [ -n "$OPT_WIFI_SSID" ]         && s+="  WiFi:         ${OPT_WIFI_SSID}\n"
-  [ -n "$OPT_DOCKER_MIRROR" ]     && s+="  Зеркало Docker: да\n"
-  [ -n "$OPT_RESTORE_BACKUP" ]    && s+="  Бэкап:        $(basename "$OPT_RESTORE_BACKUP")\n"
-  [ -n "$OPT_LOCALE" ]            && s+="  Локаль:       ${OPT_LOCALE}\n"
-  [ "$OPT_AUTO_REBOOT" = true ]   && s+="  Перезагрузка: авто\n"
-  [ "$OPT_STATIC_IP" = true ]     && s+="  Стат. IP:     ${STATIC_IP}\n"
-  [ "$OPT_TAILSCALE" = true ]     && s+="  Tailscale:    да\n"
-  [ "$OPT_CLOUDFLARED" = true ]   && s+="  Cloudflare:   да\n"
-  [ -n "$BOOT_DEV_FSTAB" ]        && s+="  Загрузчик:    ${BOOT_DEV_FSTAB}\n"
-  [ "$OPT_TELEGRAM" = true ]      && s+="  Telegram:     да\n"
-  [ -n "$OPT_WEBHOOK_URL" ]       && s+="  Webhook:      да\n"
+  
+  # Собираем список включенных базовых компонентов в одну строку для экономии места
+  local components=""
+  [ "$OPT_ZRAM" = true ]           && components+="ZRAM "
+  [ "$OPT_EMMC_TUNING" = true ]    && components+="eMMC "
+  [ "$OPT_USB_POWER" = true ]      && components+="USB_Pwr "
+  [ "$OPT_UFW" = true ]            && components+="UFW "
+  [ "$OPT_SSH_HARDENING" = true ]  && components+="SSH "
+  [ "$OPT_AUTOUPDATE" = true ]     && components+="AutoUpd "
+  [ "$OPT_WATCHDOG" = true ]       && components+="Watchdog "
+  [ "$OPT_THERMAL" = true ]        && components+="Thermal "
+  [ "$OPT_BACKUP" = true ]         && components+="Backup "
+  [ "$OPT_HACS" = true ]           && components+="HACS "
+  [ "$OPT_HOSTNAME" = true ]       && components+="Hostname "
+  [ "$OPT_MONITORING" = true ]     && components+="Monitor "
+  [ "$OPT_BOOT_RECOVERY" = true ]  && components+="BootRec "
+  [ "$OPT_USB_DETECT" = true ]     && components+="USB_Detect "
+  
+  [ -n "$components" ] && s+="  Компоненты:   ${components}\n"
+
+  # Специфичные настройки
+  [ -n "$OPT_DATA_DIR" ]           && s+="  Данные:       ${OPT_DATA_DIR}\n"
+  [ -n "$OPT_WIFI_SSID" ]          && s+="  WiFi:         ${OPT_WIFI_SSID}\n"
+  [ -n "$OPT_DOCKER_MIRROR" ]      && s+="  Зеркало Docker: да\n"
+  [ -n "$OPT_RESTORE_BACKUP" ]     && s+="  Восст. бэкапа: $(basename "$OPT_RESTORE_BACKUP")\n"
+  [ -n "$OPT_LOCALE" ]             && s+="  Локаль:       ${OPT_LOCALE}\n"
+  [ "$OPT_AUTO_REBOOT" = true ]    && s+="  Перезагрузка: авто\n"
+  [ "$OPT_STATIC_IP" = true ]      && s+="  Стат. IP:     ${STATIC_IP}\n"
+  
+  # Сеть и VPN
+  [ "$OPT_TAILSCALE" = true ]      && s+="  Tailscale:    да\n"
+  [ "$OPT_CLOUDFLARED" = true ]    && s+="  Cloudflare:   да\n"
+  [ -n "$BOOT_DEV_FSTAB" ]         && s+="  Загрузчик:    ${BOOT_DEV_FSTAB}\n"
+  
+  # Уведомления
+  [ "$OPT_TELEGRAM" = true ]       && s+="  Telegram:     да\n"
+  [ -n "$OPT_WEBHOOK_URL" ]        && s+="  Webhook:      да\n"
+  
   s+="\nНачать установку? (Нет = вернуться в меню)"
 
   if [ "$HAS_WHIPTAIL" = true ]; then
-    # Безопасный размер: 22 строки высотой, 70 символов шириной. Влезет в любой SSH.
-    whiptail --title "Подтверждение" --yesno "$s" 22 70 && return 0
+    # Безопасный размер: 22 строки высотой, 75 символов шириной.
+    whiptail --title "Подтверждение" --yesno "$s" 22 75 && return 0
     _wizard_cancelled && return 1 || exit 0
   else
     echo -e "\n$s" >&2
