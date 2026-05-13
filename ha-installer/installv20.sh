@@ -3792,28 +3792,27 @@ step_security() {
   local any=false
 
   if [ "$OPT_UFW" = true ]; then
-    configure_ufw_safe
     any=true
-    ufw status 2>/dev/null | grep -q "Status: active" || {
-      ufw --force reset >/dev/null 2>&1
-      ufw default deny incoming >/dev/null 2>&1
-      ufw default allow outgoing >/dev/null 2>&1
-      ufw default allow routed >/dev/null 2>&1
-    }
 
-    for r in "22/tcp SSH" "8123/tcp HA" "4357/tcp ESPHome" "5353/udp mDNS" "5683/udp HomeKit"; do
-      local port="${r%% *}"
-      ufw status 2>/dev/null | grep -q "$port" || ufw allow "$port" comment "${r#* }" >/dev/null 2>&1
-    done
-    ufw --force enable >/dev/null 2>&1
-    msg_ok "UFW"
+    # 1. Базовая настройка UFW (Атомарная функция)
+    # Устанавливает UFW, включает, открывает порты 22 и 8123 (если их еще нет).
+    # Не делает reset, чтобы не сломать правила, добавленные пользователем ранее.
+    configure_ufw_safe
 
+    # 2. Дополнительные порты для HA (оставляем тут, так как они специфичны)
+    ufw status | grep -qw '4357/tcp' || ufw allow 4357/tcp comment ESPHome >/dev/null 2>&1
+    ufw status | grep -qw '5353/udp' || ufw allow 5353/udp comment mDNS >/dev/null 2>&1
+    ufw status | grep -qw '5683/udp' || ufw allow 5683/udp comment HomeKit >/dev/null 2>&1
+
+    # 3. Критически важный фикс Docker + UFW (ОСТАВЛЯЕМ СТАРЫЙ КОД)
+    # Этот блок НЕ вынесен в атомарную функцию, так как он модифицирует
+    # /etc/ufw/after.rules через sed. Это специфичная логика для HA Supervised,
+    # и мы не хотим, чтобы меню модулей случайно ломало файрвол пользователя.
     if ! grep -q "# BEGIN HA-INSTALLER DOCKER-USER" /etc/ufw/after.rules 2>/dev/null; then
       local iok=true
       command -v iptables &>/dev/null && iptables --version 2>/dev/null | grep -q legacy && iok=false
       if $iok; then
         # Вставляем правила ДО последнего COMMIT в таблице *filter.
-        # Это предотвращает создание дублирующегося блока *filter, который ломает iptables-restore.
         sed -i '$ s/^COMMIT/\
 ### BEGIN HA-INSTALLER DOCKER-USER RULES ###\
 :DOCKER-USER - [0:0]\
@@ -3833,6 +3832,8 @@ COMMIT/' /etc/ufw/after.rules
       fi
     fi
 
+    # 4. Fail2Ban
+    apt_safe install -y fail2ban >/dev/null || true
     if is_trixie || [ ! -f /var/log/auth.log ]; then
       printf '[sshd]\nenabled=true\nport=ssh\nfilter=sshd\nbackend=systemd\nmaxretry=5\nbantime=3600\nfindtime=600\n' \
         > /etc/fail2ban/jail.local
@@ -3845,10 +3846,13 @@ COMMIT/' /etc/ufw/after.rules
     msg_ok "Fail2Ban"
   fi
 
+  # 5. SSH Hardening (Атомарная функция)
   if [ "$OPT_SSH_HARDENING" = true ]; then
+    any=true
     apply_ssh_hardening
   fi
 
+  # 6. Автообновления системы (Оставляем тут)
   if [ "$OPT_AUTOUPDATE" = true ]; then
     any=true
     cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'U'
