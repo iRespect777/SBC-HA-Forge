@@ -2369,6 +2369,80 @@ run_wizard() {
 }
 
 # ============================================================================
+# MODULES MENU (Установка отдельных фич на готовую систему)
+# ============================================================================
+show_modules_menu() {
+  while true; do
+    local mod
+    if command -v whiptail &>/dev/null; then
+      mod=$(whiptail --title "Модули и Фичи" --menu \
+        "Выберите модуль для установки.\nЯдро Home Assistant затронуто НЕ БУДЕТ." \
+        20 65 10 \
+        "tailscale"  "Tailscale VPN + фикс Wi-Fi" \
+        "cloudflare" "Cloudflare Tunnel (публичный HTTPS)" \
+        "security"   "UFW (безопасные правила) + SSH" \
+        "back"       "Назад в главное меню" \
+        3>&1 1>&2 2>&3) || return 1
+    else
+      mod=$(text_menu "Модули и Фичи" "Выберите:" \
+        "tailscale"  "Tailscale VPN" \
+        "cloudflare" "Cloudflare Tunnel" \
+        "security"   "Безопасность (UFW)" \
+        "back"       "Назад") || return 1
+    fi
+
+    [ -z "$mod" ] && return 1
+    [ "$mod" = "back" ] && return 0
+
+    detect_system_info
+    setup_dirs
+    acquire_lock
+    
+    case "$mod" in
+      tailscale)  module_tailscale ;;
+      cloudflare) module_cloudflare ;;
+      security)   module_security ;;
+    esac
+    
+    release_lock
+
+    echo ""
+    read -n 1 -s -r -p "Нажмите любую клавишу для возврата в меню модулей..."
+    echo ""
+  done
+}
+
+module_tailscale() {
+  header "МОДУЛЬ: TAILSCALE VPN"
+  install_tailscale; configure_tailscale_ufw; apply_wifi_powersave_fix
+  msg_info "Для авторизации: sudo tailscale up"
+}
+
+module_cloudflare() {
+  header "МОДУЛЬ: CLOUDFLARE TUNNEL"
+  install_cloudflared
+  if command -v cloudflared &>/dev/null; then
+    local token=""
+    if command -v whiptail &>/dev/null; then
+      token=$(_whip_input "Cloudflare Token" "Вставьте токен:" "") || token=""
+    else
+      token=$(text_input "Вставьте Cloudflare Token" "")
+    fi
+    configure_cloudflare_tunnel "$token"
+  fi
+}
+
+module_security() {
+  header "МОДУЛЬ: БЕЗОПАСНОСТЬ (UFW + SSH)"
+  configure_ufw_safe
+  if [ -t 0 ]; then
+    echo -en "   ${ARROW} Применить жесткую защиту SSH? (д/н): " >&2
+    local ans; read -r ans
+    ([ "$ans" = "y" ] || [ "$ans" = "Y" ] || [ "$ans" = "д" ] || [ "$ans" = "Д" ]) && apply_ssh_hardening
+  fi
+}
+
+# ============================================================================
 # MAIN MENU
 # ============================================================================
 show_main_menu() {
@@ -2379,6 +2453,7 @@ show_main_menu() {
   if command -v whiptail &>/dev/null; then
     choice=$(whiptail --title "HA Установщик v${SCRIPT_VERSION}" --menu "Действие:" 24 60 15 \
       "install"   "Установить HA Supervised" \
+      "modules"   "Установить отдельные модули (Tailscale, VPN и пр.)"\
       "check"     "Диагностика" \
       "status"    "Мониторинг (live)" \
       "update"    "Обновить OS-Agent" \
@@ -2396,6 +2471,7 @@ show_main_menu() {
   else
     choice=$(text_menu "HA Установщик v${SCRIPT_VERSION}" "Действие:" \
       "install"   "Установить HA" \
+      "modules"   "Установить отдельные модули (Tailscale, VPN и пр.)"\
       "check"     "Диагностика" \
       "status"    "Мониторинг" \
       "update"    "Обновить OS-Agent" \
@@ -2415,6 +2491,7 @@ show_main_menu() {
 
   case "$choice" in
     install)   RUN_WIZARD=true;;
+    modules)   show_modules_menu; IMMEDIATE_ACTION=true; RUN_WIZARD=false;;
     check)     CHECK_ONLY=true; RUN_WIZARD=false;;
     status)    SHOW_STATUS=true; RUN_WIZARD=false;;
     update)    DO_UPDATE=true; RUN_WIZARD=false;;
@@ -2465,6 +2542,229 @@ show_main_menu() {
     selftest)  DO_SELF_TEST=true; RUN_WIZARD=false;;
     help)      show_help; exit 0;;
   esac
+}
+
+# ============================================================================
+# ATOMIC ACTIONS
+# ============================================================================
+
+# --- SYSTEM & PERFORMANCE ---
+setup_timezone() {
+  local tz="$1"
+  [ -z "$tz" ] && return 0
+  if [ -f "/usr/share/zoneinfo/${tz}" ]; then
+    timedatectl set-timezone "$tz" 2>/dev/null || ln -sf "/usr/share/zoneinfo/${tz}" /etc/localtime
+    msg_ok "Часовой пояс: ${tz}"
+  else
+    msg_warn "Неизвестный часовой пояс: ${tz}"
+  fi
+}
+
+setup_locale() {
+  local loc="$1"
+  [ -z "$loc" ] && return 0
+  if command -v locale-gen &>/dev/null; then
+    sed -i "s/^# *${loc}/${loc}/" /etc/locale.gen 2>/dev/null
+    locale-gen 2>/dev/null || true
+    update-locale LANG="${loc}" 2>/dev/null || true
+    msg_ok "Локаль: ${loc}"
+  fi
+}
+
+setup_swap() {
+  local size="$1"
+  [ -z "$size" ] && return 0
+  case "$size" in
+    none|0) swapoff -a 2>/dev/null; sed -i '/swap/d' /etc/fstab 2>/dev/null; msg_ok "Swap отключен" ;;
+    zram)    setup_zram ;;
+    *)
+      if [[ "$size" =~ ^[0-9]+$ ]]; then
+        swapoff /swapfile 2>/dev/null; rm -f /swapfile 2>/dev/null
+        dd if=/dev/zero of=/swapfile bs=1M count="$size" status=none 2>/dev/null
+        chmod 600 /swapfile; mkswap /swapfile >/dev/null 2>&1; swapon /swapfile 2>/dev/null
+        grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+        msg_ok "Swap: ${size}МБ"
+      else msg_warn "Неверный размер swap: ${size}"; fi ;;
+  esac
+}
+
+setup_zram() {
+  if is_armbian && is_pkg_installed armbian-zram-config; then msg_ok "ZRAM: Armbian"; return 0; fi
+  if is_pkg_installed zram-tools; then
+    printf 'ALGO=lz4\nPERCENT=60\n' > /etc/default/zramswap
+    systemctl enable zramswap 2>/dev/null; systemctl restart zramswap 2>/dev/null
+    msg_ok "ZRAM настроен"
+  elif is_pkg_installed systemd-zram-generator; then
+    mkdir -p /etc/systemd/zram-generator.conf.d
+    printf '[zram0]\nzram-size = ram * 0.6\ncompression-algorithm = lz4\n' > /etc/systemd/zram-generator.conf.d/ha.conf
+    systemctl daemon-reload 2>/dev/null
+    msg_ok "ZRAM настроен (generator)"
+  else msg_warn "ZRAM недоступен"; fi
+}
+
+apply_emmc_tuning() {
+  echo "vm.swappiness=10" > /etc/sysctl.d/99-ha-swap.conf
+  sysctl -p /etc/sysctl.d/99-ha-swap.conf >/dev/null 2>&1
+  grep -q noatime /etc/fstab 2>/dev/null || { cp /etc/fstab "${BACKUP_DIR}/fstab.bak" 2>/dev/null; sed -i '/^\//s/defaults/defaults,noatime,commit=600/' /etc/fstab 2>/dev/null; }
+  mkdir -p /etc/systemd/journald.conf.d
+  printf '[Journal]\nSystemMaxUse=50M\nSystemMaxFileSize=10M\nMaxRetentionSec=7day\nCompress=yes\nStorage=persistent\nSystemKeepFree=100M\n' > /etc/systemd/journald.conf.d/ha-tuning.conf
+  systemctl restart systemd-journald 2>/dev/null
+  msg_ok "Оптимизация eMMC"
+}
+
+apply_usb_power_fix() {
+  for d in /sys/bus/usb/devices/*/power/autosuspend; do [ -f "$d" ] && echo -1 > "$d" 2>/dev/null; done
+  echo 'ACTION=="add", SUBSYSTEM=="usb", ATTR{power/autosuspend}="-1"' > /etc/udev/rules.d/99-ha-usb-power.rules
+  udevadm control --reload-rules 2>/dev/null
+  msg_ok "USB питание"
+}
+
+# --- DOCKER ---
+install_docker() {
+  if command -v docker &>/dev/null; then msg_ok "Docker уже установлен"; return 0; fi
+  msg_action "Установка Docker..."
+  apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+  local codename="${CACHED_CODENAME:-bookworm}"
+  [[ "$codename" == "sid" ]] && codename="trixie"
+  [ -z "$codename" ] && codename="bookworm"
+
+  local docker_ok=false
+  if command -v curl &>/dev/null; then
+    install -m 0755 -d /etc/apt/keyrings 2>/dev/null
+    if curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc 2>/dev/null; then
+      chmod a+r /etc/apt/keyrings/docker.asc
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${codename} stable" > /etc/apt/sources.list.d/docker.list
+      apt-get update -qq 2>/dev/null
+      apt_safe install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin &>/dev/null && docker_ok=true
+    fi
+  fi
+  if [ "$docker_ok" = false ]; then
+    msg_warn "Официальный репо не сработал -> get.docker.com"
+    curl -fsSL https://get.docker.com | sh >/dev/null 2>&1 || { msg_error "Docker не установился!"; return 1; }
+  fi
+  hash -r 2>/dev/null; msg_ok "Docker установлен"
+}
+
+configure_docker_mirror() {
+  local mirror_url="$1"; [ -z "$mirror_url" ] && return 0
+  mkdir -p /etc/docker
+  if command -v jq &>/dev/null; then
+    # Если файла нет, создаем базовый для корректной работы jq
+    [ ! -f /etc/docker/daemon.json ] && echo '{}' > /etc/docker/daemon.json
+    jq --arg m "$mirror_url" '. + {"registry-mirrors": [$m]}' /etc/docker/daemon.json > /tmp/dj.tmp 2>/dev/null && mv /tmp/dj.tmp /etc/docker/daemon.json
+    msg_ok "Зеркало Docker: ${mirror_url}"
+  else
+    # БЕЗОПАСНОСТЬ: Если jq нет, мы НЕ перезаписываем daemon.json целиком, 
+    # чтобы не сломать текущую конфигурацию на уже работающей системе.
+    msg_warn "Утилита jq не установлена. Не удалось безопасно добавить зеркало в daemon.json"
+    msg_dim "Добавьте вручную: ${mirror_url}"
+  fi
+}
+
+setup_data_dir() {
+  local target_dir="$1"; [ -z "$target_dir" ] && return 0
+  if [ ! -d "$target_dir" ]; then msg_error "Каталог не найден: ${target_dir}"; return 1; fi
+  if ! touch "${target_dir}/.ha_test" 2>/dev/null; then msg_error "Нет доступа: ${target_dir}"; return 1; fi
+  rm -f "${target_dir}/.ha_test"
+
+  if [ -d /var/lib/docker ] && [ ! -L /var/lib/docker ]; then
+    systemctl stop docker 2>/dev/null; mkdir -p "${target_dir}/docker"
+    [ ! -d "${target_dir}/docker/overlay2" ] && { rsync -aHAX /var/lib/docker/ "${target_dir}/docker/" 2>/dev/null || cp -a /var/lib/docker/* "${target_dir}/docker/" 2>/dev/null; }
+    mv /var/lib/docker /var/lib/docker.bak 2>/dev/null; ln -sf "${target_dir}/docker" /var/lib/docker
+    systemctl start docker 2>/dev/null; msg_ok "Docker -> ${target_dir}/docker"
+  fi
+
+  mkdir -p "${target_dir}/hassio"
+  if [ -d "$HASSIO_DIR" ] && [ ! -L "$HASSIO_DIR" ]; then
+    rsync -aHAX "${HASSIO_DIR}/" "${target_dir}/hassio/" 2>/dev/null || cp -a "${HASSIO_DIR}"/* "${target_dir}/hassio/" 2>/dev/null
+    mv "$HASSIO_DIR" "${HASSIO_DIR}.bak" 2>/dev/null; ln -sf "${target_dir}/hassio" "$HASSIO_DIR"; msg_ok "HA -> ${target_dir}/hassio"
+  elif [ ! -d "$HASSIO_DIR" ]; then
+    ln -sf "${target_dir}/hassio" "$HASSIO_DIR"; msg_ok "HA привязан: ${target_dir}/hassio"
+  fi
+}
+
+wait_for_docker() {
+  local dw=0
+  while ! docker info &>/dev/null; do
+    sleep 2; dw=$((dw+2)); [ $dw -ge 30 ] && { msg_error "Docker не запустился!"; return 1; }
+  done
+}
+
+# --- NETWORK ---
+apply_wifi_powersave_fix() {
+  local wifi_dev
+  wifi_dev=$(nmcli -t -f DEVICE,TYPE dev status 2>/dev/null | grep ':wifi$' | head -1 | cut -d: -f1)
+  if [ -n "$wifi_dev" ]; then
+    local wifi_uuid
+    wifi_uuid=$(nmcli -g GENERAL.CON-UUID dev show "$wifi_dev" 2>/dev/null)
+    if [ -n "$wifi_uuid" ]; then
+      nmcli con modify "$wifi_uuid" 802-11-wireless.powersave 2 2>/dev/null || true
+      msg_ok "Wi-Fi Power Save отключен"
+    fi
+  fi
+}
+
+# --- TAILSCALE ---
+install_tailscale() {
+  if ! command -v tailscale &>/dev/null; then
+    msg_action "Установка Tailscale..."; curl -fsSL https://tailscale.com/install.sh | sh; msg_ok "Tailscale установлен"
+  else msg_ok "Tailscale уже установлен"; fi
+}
+
+configure_tailscale_ufw() {
+  if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "status: active"; then
+    ufw status | grep -qw '41641/udp' || ufw allow 41641/udp comment "Tailscale WireGuard" >/dev/null 2>&1
+    ufw status | grep -qw 'tailscale0' || ufw allow in on tailscale0 comment "Tailscale VPN" >/dev/null 2>&1
+    msg_ok "Правила UFW для Tailscale добавлены"
+  fi
+}
+
+auth_tailscale() {
+  local ts_key="$1"
+  if [ -n "$ts_key" ]; then
+    msg_dim "Авторизация через Auth Key..."
+    tailscale up --authkey="$ts_key" --accept-routes >/dev/null 2>&1 && msg_ok "Tailscale авторизован" || msg_warn "Ошибка авторизации"
+  else msg_info "Для авторизации: sudo tailscale up"; fi
+}
+
+# --- CLOUDFLARE ---
+install_cloudflared() {
+  if ! command -v cloudflared &>/dev/null; then
+    local cf_arch=""
+    case "$CACHED_MACHINE_ARCH" in x86_64) cf_arch="amd64";; aarch64) cf_arch="arm64";; armv7l) cf_arch="arm";; *) msg_warn "Архитектура не поддерживается"; return 1;; esac
+    msg_action "Загрузка cloudflared..."
+    curl -L --fail --progress-bar "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}" -o /usr/local/bin/cloudflared 2>/dev/null && chmod +x /usr/local/bin/cloudflared && msg_ok "Cloudflared установлен" || msg_error "Не удалось загрузить"
+  else msg_ok "Cloudflared уже установлен"; fi
+}
+
+configure_cloudflare_tunnel() {
+  local cf_token="$1"
+  if [ -n "$cf_token" ]; then
+    msg_dim "Регистрация туннеля..."; cloudflared service uninstall >/dev/null 2>&1 || true
+    if cloudflared service install "$cf_token" >/dev/null 2>&1; then
+      systemctl enable cloudflared >/dev/null 2>&1; systemctl start cloudflared >/dev/null 2>&1; msg_ok "Cloudflare Tunnel запущен"
+    else msg_error "Ошибка установки (неверный токен?)"; fi
+  else msg_warn "Токен не предоставлен. Настройка: sudo cloudflared service install <ТОКЕН>"; fi
+}
+
+# --- SECURITY ---
+configure_ufw_safe() {
+  if ! command -v ufw &>/dev/null; then apt_safe install -y ufw >/dev/null; fi
+  if ! ufw status 2>/dev/null | grep -q "status: active"; then
+    ufw default deny incoming >/dev/null; ufw default allow outgoing >/dev/null; ufw --force enable >/dev/null
+  fi
+  # Безопасная проверка существующих правил (поиск по целому слову -w)
+  ufw status | grep -qw '22/tcp' || ufw allow 22/tcp comment SSH >/dev/null
+  ufw status | grep -qw '8123/tcp' || ufw allow 8123/tcp comment HA >/dev/null
+  msg_ok "UFW настроен (22, 8123 открыты)"
+}
+
+apply_ssh_hardening() {
+  mkdir -p /etc/ssh/sshd_config.d
+  cp /etc/ssh/sshd_config "${BACKUP_DIR}/sshd_config.bak" 2>/dev/null
+  printf 'PermitRootLogin prohibit-password\nMaxAuthTries 3\nClientAliveInterval 300\nClientAliveCountMax 2\nX11Forwarding no\n' > /etc/ssh/sshd_config.d/99-ha-hardening.conf
+  systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+  msg_ok "SSH защищен"
 }
 
 # ============================================================================
@@ -3198,88 +3498,14 @@ step_performance() {
   local sid="perf"; is_done "$sid" && return 0
   header "[${CURRENT_STEP_NUM}/${TOTAL_STEPS}] ПРОИЗВОДИТЕЛЬНОСТЬ"
 
-  # ZRAM
-  if [ "$OPT_ZRAM" = true ]; then
-    [ -f /swapfile ] && [ "$OPT_SWAP_SIZE" != "none" ] && {
-      swapoff /swapfile 2>/dev/null; rm -f /swapfile; sed -i '/swapfile/d' /etc/fstab
-    }
-
-    if is_armbian && is_pkg_installed armbian-zram-config; then
-      msg_ok "ZRAM: Armbian"
-    elif is_pkg_installed zram-tools; then
-      printf 'ALGO=lz4\nPERCENT=60\n' > /etc/default/zramswap
-      systemctl enable zramswap 2>/dev/null || true
-      systemctl restart zramswap 2>/dev/null || true
-      msg_ok "ZRAM"
-    elif is_pkg_installed systemd-zram-generator; then
-      mkdir -p /etc/systemd/zram-generator.conf.d
-      printf '[zram0]\nzram-size = ram * 0.6\ncompression-algorithm = lz4\n' \
-        > /etc/systemd/zram-generator.conf.d/ha.conf
-      schedule_daemon_reload; flush_daemon_reload
-      msg_ok "ZRAM"
-    elif modprobe zram 2>/dev/null && [ -b /dev/zram0 ]; then
-      local rb; rb=$(awk '/MemTotal/{print $2}' /proc/meminfo)
-      echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || true
-      echo $((rb*1024*60/100)) > /sys/block/zram0/disksize 2>/dev/null || true
-      mkswap /dev/zram0 >/dev/null 2>&1 && swapon -p 100 /dev/zram0 2>/dev/null
-      msg_ok "ZRAM (вручную)"
-    else
-      msg_warn "ZRAM недоступен"
-    fi
+  setup_swap "$OPT_SWAP_SIZE"
+  
+  if [ "$OPT_ZRAM" = true ] && [ "$OPT_SWAP_SIZE" != "zram" ]; then
+    setup_zram
   fi
 
-  # CPU
-  if is_armbian && systemctl is-active --quiet armbian-hardware-optimization 2>/dev/null; then
-    msg_dim "CPU: управляется Armbian"
-  elif command -v cpupower &>/dev/null; then
-    cpupower frequency-set -g schedutil 2>/dev/null || cpupower frequency-set -g ondemand 2>/dev/null || true
-    msg_ok "CPU: schedutil"
-  elif command -v cpufreq-set &>/dev/null; then
-    echo 'GOVERNOR="schedutil"' > /etc/default/cpufrequtils
-    msg_ok "CPU: schedutil"
-  else
-    for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-      [ -f "$g" ] && { echo schedutil > "$g" 2>/dev/null || echo ondemand > "$g" 2>/dev/null; }
-    done
-  fi
-
-  # eMMC
-  if [ "$OPT_EMMC_TUNING" = true ]; then
-    echo "vm.swappiness=10" > /etc/sysctl.d/99-ha-swap.conf
-    sysctl -p /etc/sysctl.d/99-ha-swap.conf >/dev/null 2>&1 || true
-
-    grep -q noatime /etc/fstab 2>/dev/null || {
-      cp /etc/fstab "${BACKUP_DIR}/fstab.bak" 2>/dev/null
-      sed -i '/^\//s/defaults/defaults,noatime,commit=600/' /etc/fstab 2>/dev/null || true
-    }
-
-    mkdir -p /etc/systemd/journald.conf.d
-    is_armbian && is_pkg_installed armbian-ramlog || {
-      printf '[Journal]\nSystemMaxUse=50M\nSystemMaxFileSize=10M\nMaxRetentionSec=7day\nCompress=yes\nStorage=persistent\nSystemKeepFree=100M\n' \
-        > /etc/systemd/journald.conf.d/ha-tuning.conf
-      systemctl restart systemd-journald 2>/dev/null || true
-    }
-
-    local rd="" rs=""
-    rs=$(findmnt -n -o SOURCE / 2>/dev/null)
-    [ -n "$rs" ] && [ -b "$rs" ] && rd=$(lsblk -no PKNAME "$rs" 2>/dev/null | head -1)
-    if [ -n "$rd" ] && [ "$(cat "/sys/block/${rd}/queue/rotational" 2>/dev/null)" = "0" ]; then
-      [[ "$rd" == nvme* ]] && echo none > "/sys/block/${rd}/queue/scheduler" 2>/dev/null || true
-      [[ "$rd" == mmcblk* || "$rd" == sd* ]] && echo mq-deadline > "/sys/block/${rd}/queue/scheduler" 2>/dev/null || true
-    fi
-    msg_ok "Оптимизация eMMC"
-  fi
-
-  # USB
-  [ "$OPT_USB_POWER" = true ] && {
-    for d in /sys/bus/usb/devices/*/power/autosuspend; do
-      [ -f "$d" ] && echo -1 > "$d" 2>/dev/null
-    done
-    echo 'ACTION=="add", SUBSYSTEM=="usb", ATTR{power/autosuspend}="-1"' \
-      > /etc/udev/rules.d/99-ha-usb-power.rules
-    udevadm control --reload-rules 2>/dev/null || true
-    msg_ok "USB питание"
-  }
+  [ "$OPT_EMMC_TUNING" = true ] && apply_emmc_tuning
+  [ "$OPT_USB_POWER" = true ]   && apply_usb_power_fix
 
   mark_done "$sid"
 }
@@ -3291,70 +3517,23 @@ step_install_docker() {
   local sid="docker"; is_done "$sid" && return 0
   header "[${CURRENT_STEP_NUM}/${TOTAL_STEPS}] DOCKER"
 
-  require_disk_space 2000 "Docker" || { msg_error "Нет места для Docker"; exit 1; }
-  push_rollback 'apt-get remove -y docker-ce docker-ce-cli containerd.io 2>/dev/null; rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc'
-  setup_docker_mirror
+  require_disk_space 2000 "Docker" || exit 1
+  push_rollback 'apt-get remove -y docker-ce docker-ce-cli containerd.io 2>/dev/null'
 
-  if command -v docker &>/dev/null; then
-    msg_ok "Docker: $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')"
-    local drv; drv=$(docker info --format '{{.Driver}}' 2>/dev/null || echo "unknown")
-    msg_info "Storage driver: ${drv}"
-    [ "$drv" != "overlay2" ] && msg_warn "Рекомендуется overlay2 (сейчас: ${drv})"
-  else
-    apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
-    detect_system_info
-    local codename="${CACHED_CODENAME}"
-        # Проверить что репозиторий Docker существует для этого codename
-        if [[ "$codename" == "sid" ]]; then
-            # Для sid используем trixie
-            codename="trixie"
-        elif [ -z "$codename" ]; then
-            # Неизвестный codename — fallback на bookworm
-            codename="bookworm"
-        fi
-
-    local docker_ok=false
-    if command -v curl &>/dev/null; then
-      spinner_start "Docker (официальный репо)"
-      install -m 0755 -d /etc/apt/keyrings 2>/dev/null
-      if curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc 2>/dev/null; then
-        chmod a+r /etc/apt/keyrings/docker.asc
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${codename} stable" \
-          > /etc/apt/sources.list.d/docker.list
-        apt-get update -qq 2>/dev/null
-        apt_safe install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin &>/dev/null && docker_ok=true
-      fi
-      spinner_stop
-    fi
-
-    if [ "$docker_ok" = false ]; then
-      msg_warn "Официальный репо не сработал -> get.docker.com"
-      spinner_start "Docker (get.docker.com)"
-      curl -fsSL https://get.docker.com | sh >/dev/null 2>&1 || { spinner_stop; msg_error "Docker не установился!"; exit 1; }
-      spinner_stop
-    fi
-
-    hash -r 2>/dev/null
-    msg_ok "Docker установлен"
-    local drv; drv=$(docker info --format '{{.Driver}}' 2>/dev/null || echo "unknown")
-    msg_info "Storage driver: ${drv}"
-  fi
+  install_docker || exit 1
 
   mkdir -p /etc/docker
   [ ! -f /etc/docker/daemon.json ] && \
     echo '{"log-driver":"journald","storage-driver":"overlay2"}' > /etc/docker/daemon.json
+  
+  configure_docker_mirror "$OPT_DOCKER_MIRROR"
 
   systemctl enable docker 2>/dev/null || true
   systemctl restart docker 2>/dev/null || true
+  wait_for_docker
 
-  local dw=0
-  while ! docker info &>/dev/null; do
-    sleep 2; dw=$((dw+2))
-    [ $dw -ge 30 ] && { msg_error "Docker не запустился!"; exit 1; }
-  done
+  setup_data_dir "$OPT_DATA_DIR"
 
-  setup_data_dir
-  # prefetch убран — supervisor сам загрузит образы в step_install_ha
   mark_done "$sid"
 }
 
@@ -3613,6 +3792,7 @@ step_security() {
   local any=false
 
   if [ "$OPT_UFW" = true ]; then
+    configure_ufw_safe
     any=true
     ufw status 2>/dev/null | grep -q "Status: active" || {
       ufw --force reset >/dev/null 2>&1
@@ -3666,14 +3846,7 @@ COMMIT/' /etc/ufw/after.rules
   fi
 
   if [ "$OPT_SSH_HARDENING" = true ]; then
-    any=true
-    mkdir -p /etc/ssh/sshd_config.d
-    cp /etc/ssh/sshd_config "${BACKUP_DIR}/sshd_config.bak" 2>/dev/null
-    printf 'PermitRootLogin prohibit-password\nMaxAuthTries 3\nClientAliveInterval 300\nClientAliveCountMax 2\nX11Forwarding no\n' \
-      > /etc/ssh/sshd_config.d/99-ha-hardening.conf
-    systemctl list-unit-files ssh.service &>/dev/null && systemctl reload ssh 2>/dev/null || \
-      systemctl reload sshd 2>/dev/null || true
-    msg_ok "SSH защищён"
+    apply_ssh_hardening
   fi
 
   if [ "$OPT_AUTOUPDATE" = true ]; then
@@ -4257,127 +4430,29 @@ UNIT
     msg_ok "Восстановление загрузки"
   fi
 
-  # --- Tailscale VPN ---
+    # --- Tailscale VPN ---
   if [ "$OPT_TAILSCALE" = true ]; then
     msg_action "Настройка Tailscale VPN..."
-    
-    # Сохраняем Auth Key в secrets (если предоставлен)
     if [ -n "${TS_AUTHKEY}" ]; then
-      printf '%s' "${TS_AUTHKEY}" > "${secrets_dir}/ts_authkey"
-      chmod 600 "${secrets_dir}/ts_authkey"
+      mkdir -p "${HA_INSTALLER_DIR}/secrets"; printf '%s' "${TS_AUTHKEY}" > "${HA_INSTALLER_DIR}/secrets/ts_authkey"; chmod 600 "${HA_INSTALLER_DIR}/secrets/ts_authkey"
     fi
-
-    # Устанавливаем Tailscale через официальный скрипт
-    if ! command -v tailscale &>/dev/null; then
-      msg_dim "Загрузка официального установщика Tailscale..."
-      if curl -fsSL https://tailscale.com/install.sh 2>/dev/null | sh >/dev/null 2>&1; then
-        msg_ok "Tailscale установлен"
-      else
-        msg_warn "Не удалось установить Tailscale"
-      fi
-    else
-      msg_ok "Tailscale уже установлен"
-    fi
-
-    # Запускаем службу
-    if command -v tailscaled &>/dev/null; then
-      systemctl enable tailscaled >/dev/null 2>&1 || true
-      systemctl start tailscaled >/dev/null 2>&1 || true
-      sleep 2
-
-      # Настройка UFW для Tailscale
-      if [ "$OPT_UFW" = true ]; then
-        # 1. Разрешаем ВХОДЯЩИЙ трафик на VPN-интерфейсе.
-        # Исходящие ответы разрешаются автоматически (UFW stateful).
-        # Мы доверяем всей сети Tailscale, поэтому открываем все порты на этом интерфейсе.
-        ufw allow in on tailscale0 comment "Tailscale VPN" >/dev/null 2>&1
-        
-        # 2. Открываем UDP порт 41641 на основном интерфейсе.
-        # Это критически важно для установки прямых P2P соединений (WireGuard).
-        # Без этого правила устройства будут общаться через relay-серверы (DERP),
-        # что добавляет задержку, недопустимую для умного дома (Алиса, камеры).
-        ufw allow 41641/udp comment "Tailscale WireGuard" >/dev/null 2>&1
-        
-        msg_dim "UFW: трафик Tailscale разрешен"
-      fi
-
-      # Авторизация
-      local ts_key="${TS_AUTHKEY}"
-      if [ -z "$ts_key" ] && [ -f "${HA_INSTALLER_DIR}/secrets/ts_authkey" ]; then
-        ts_key=$(cat "${HA_INSTALLER_DIR}/secrets/ts_authkey" | tr -d '[:space:]')
-      fi
-
-      if [ -n "$ts_key" ]; then
-        msg_dim "Авторизация через Auth Key..."
-        # --accept-routes позволяет использовать подсети из админки Tailscale
-        if tailscale up --authkey="$ts_key" --accept-routes >/dev/null 2>&1; then
-          msg_ok "Tailscale авторизован через Auth Key"
-        else
-          msg_warn "Ошибка авторизации (ключ истек или неверный)"
-        fi
-      fi
-      # Без Auth Key НЕ запускаем `tailscale up` — заблокирует скрипт ожидая браузер.
-    fi
+    install_tailscale; configure_tailscale_ufw; apply_wifi_powersave_fix
+    local ts_key="${TS_AUTHKEY}"
+    [ -z "$ts_key" ] && [ -f "${HA_INSTALLER_DIR}/secrets/ts_authkey" ] && ts_key=$(cat "${HA_INSTALLER_DIR}/secrets/ts_authkey" | tr -d '[:space:]')
+    auth_tailscale "$ts_key"
   fi
 
   # --- Cloudflare Tunnel ---
   if [ "$OPT_CLOUDFLARED" = true ]; then
     msg_action "Настройка Cloudflare Tunnel..."
-    
-    # Сохраняем Token в secrets
-    local secrets_dir="${HA_INSTALLER_DIR}/secrets"
     if [ -n "${CF_TUNNEL_TOKEN}" ]; then
-      printf '%s' "${CF_TUNNEL_TOKEN}" > "${secrets_dir}/cf_token"
-      chmod 600 "${secrets_dir}/cf_token"
+      mkdir -p "${HA_INSTALLER_DIR}/secrets"; printf '%s' "${CF_TUNNEL_TOKEN}" > "${HA_INSTALLER_DIR}/secrets/cf_token"; chmod 600 "${HA_INSTALLER_DIR}/secrets/cf_token"
     fi
-
-    # Устанавливаем бинарник (надежнее чем репозиторий для ARM боксов)
-    if ! command -v cloudflared &>/dev/null; then
-      local cf_arch=""
-      case "$CACHED_MACHINE_ARCH" in
-        x86_64)  cf_arch="amd64" ;;
-        aarch64) cf_arch="arm64" ;;
-        armv7l)  cf_arch="arm" ;;
-        *)       msg_warn "Архитектура не поддерживается Cloudflared"; cf_arch="" ;;
-      esac
-
-      if [ -n "$cf_arch" ]; then
-        msg_dim "Загрузка cloudflared для ${cf_arch}..."
-        if curl -L --fail --progress-bar "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}" -o /usr/local/bin/cloudflared; then
-          chmod +x /usr/local/bin/cloudflared
-          msg_ok "Cloudflared установлен"
-        else
-          msg_error "Не удалось загрузить cloudflared"
-        fi
-      fi
-    else
-      msg_ok "Cloudflared уже установлен"
-    fi
-
-    # Настройка и запуск службы (через Token — официальный метод)
+    install_cloudflared
     if command -v cloudflared &>/dev/null; then
-      # Читаем токен из secrets, если не передан прямо сейчас (для переустановок)
-      if [ -z "$CF_TUNNEL_TOKEN" ] && [ -f "${secrets_dir}/cf_token" ]; then
-        CF_TUNNEL_TOKEN=$(cat "${secrets_dir}/cf_token" | tr -d '[:space:]')
-      fi
-
-      if [ -n "$CF_TUNNEL_TOKEN" ]; then
-        msg_dim "Регистрация туннеля в Cloudflare..."
-        # Удаляем старый сервис если был, чтобы избежать конфликтов
-        cloudflared service uninstall >/dev/null 2>&1 || true
-        
-        # Официальная команда установки (сама создает systemd сервис)
-        if cloudflared service install "$CF_TUNNEL_TOKEN" >/dev/null 2>&1; then
-          systemctl enable cloudflared >/dev/null 2>&1 || true
-          systemctl start cloudflared >/dev/null 2>&1 || true
-          msg_ok "Cloudflare Tunnel настроен и запущен"
-        else
-          msg_error "Ошибка установки сервиса Cloudflare (неверный токен?)"
-        fi
-      else
-        msg_warn "Токен не предоставлен. Сервис не настроен."
-        msg_dim "Для настройки позже: sudo cloudflared service install <ТОКЕН>"
-      fi
+      local cf_token="${CF_TUNNEL_TOKEN}"
+      [ -z "$cf_token" ] && [ -f "${HA_INSTALLER_DIR}/secrets/cf_token" ] && cf_token=$(cat "${HA_INSTALLER_DIR}/secrets/cf_token" | tr -d '[:space:]')
+      configure_cloudflare_tunnel "$cf_token"
     fi
   fi
   
