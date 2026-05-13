@@ -6,11 +6,6 @@
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/HAS-tvbox
-#
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/iRespect777/HAS-tvbox/refs/heads/main/ha-installer/install.sh -o /tmp/install.sh
-#   sudo bash /tmp/install.sh
-#
 # ============================================================================
 if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
