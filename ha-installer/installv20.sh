@@ -5868,7 +5868,7 @@ Docker и сеть останутся.\n\
 
         # Показать оставшиеся зависимости
         msg_info "Установленные зависимости (можно удалить вручную):"
-        local dep_pkgs="apparmor avahi-daemon bluez fail2ban ufw"
+        local dep_pkgs="avahi-daemon bluez fail2ban ufw"
         dep_pkgs+=" unattended-upgrades"
         dep_pkgs+=" zram-tools systemd-zram-generator"
         dep_pkgs+=" linux-cpupower cpufrequtils"
