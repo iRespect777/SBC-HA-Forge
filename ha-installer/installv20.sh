@@ -3044,77 +3044,84 @@ RCEOF
 }
 
 # ============================================================================
-# ШАГ: СЕТЬ
+# SETUP: Настройка конфигурации сети
 # ============================================================================
-step_configure_network() {
-  local sid="network"; is_done "$sid" && return 0
-  header "[${CURRENT_STEP_NUM}/${TOTAL_STEPS}] НАСТРОЙКА СЕТИ"
 
+# Подготовка конфигов для NetworkManager и systemd-resolved
+setup_network_configs() {
   mkdir -p "$BACKUP_DIR" /etc/NetworkManager/conf.d
-  push_rollback 'rollback_network'
 
-  local cip; cip=$(hostname -I 2>/dev/null | awk '{print $1}')
-  [ -n "$cip" ] && msg_info "Текущий IP: ${cip}"
-
+  # 1. Конфиги NetworkManager
   printf '[keyfile]\nunmanaged-devices=none\n[device]\nwifi.scan-rand-mac-address=no\n' \
     > /etc/NetworkManager/conf.d/10-ha-managed.conf
   printf '[main]\ndns=systemd-resolved\n' \
     > /etc/NetworkManager/conf.d/10-dns-resolved.conf
 
+  # 2. Бэкап и очистка /etc/network/interfaces (чтобы не конфликтовал с NM)
   [ -f /etc/network/interfaces ] && cp /etc/network/interfaces "$BACKUP_DIR/interfaces.bak" 2>/dev/null
   printf 'source /etc/network/interfaces.d/*\nauto lo\niface lo inet loopback\n' > /etc/network/interfaces
 
+  # 3. Настройка systemd-resolved
   systemctl is-active --quiet systemd-resolved 2>/dev/null || {
     systemctl enable systemd-resolved 2>/dev/null || true
     systemctl start systemd-resolved 2>/dev/null || true
   }
 
+  # 4. Перенаправление resolv.conf на systemd-resolved
   local rt; rt=$(readlink -f /etc/resolv.conf 2>/dev/null)
   [[ "$rt" != */run/systemd/resolve/* ]] && {
     cp /etc/resolv.conf "${BACKUP_DIR}/resolv.conf.bak" 2>/dev/null
     ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null
   }
 
-  if who 2>/dev/null | grep -q pts; then
-    msg_warn "SSH-сессия! Переключение сети..."
-    if [ "$SILENT" = true ] || [ "$DRY_RUN" = true ]; then
-      # В тихом или тестовом режиме пауза не нужна
-      msg_dim "Silent/dry-run режим: пауза пропущена"
-    elif [ -n "$FROM_STEP" ]; then
-      # Продолжение после перезагрузки — сеть уже переключена
-      # на предыдущем запуске, пауза не нужна
-      msg_dim "Продолжение после reboot: пауза пропущена"
-    else
-      # Обычный запуск через SSH — даём время завершить операции
-      msg_dim "Пауза 15с для завершения активных SSH операций..."
-      sleep 15
-    fi
-  fi
-
+  # 5. Отключение ifupdown (networking.service)
   systemctl list-unit-files networking.service &>/dev/null && \
     systemctl is-active --quiet networking 2>/dev/null && \
     systemctl disable networking 2>/dev/null || true
-    # Убедиться что NM установлен
+}
+
+# ============================================================================
+# INSTALL: Установка пакетов
+# ============================================================================
+
+# Установка NetworkManager (с защитой от раннего запуска)
+install_network_manager() {
   if ! is_pkg_installed network-manager; then
     msg_action "Установка network-manager..."
+    
+    # Временная блокировка автозапуска служб после apt
+    local policy_created=false
+    if [ ! -f /usr/sbin/policy-rc.d ]; then
+      cat > /usr/sbin/policy-rc.d << 'RCEOF'
+#!/bin/sh
+exit 101
+RCEOF
+      chmod +x /usr/sbin/policy-rc.d
+      policy_created=true
+    fi
+
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
       -o Dpkg::Options::="--force-confold" \
       network-manager </dev/null >/dev/null 2>&1 || { msg_error "network-manager не установился"; return 1; }
+
+    # Снятие блокировки автозапуска
+    if [ "$policy_created" = true ]; then
+      rm -f /usr/sbin/policy-rc.d
+    fi
+
+    # Остановить NM если он всё-таки умудрился запуститься до нашей настройки
+    systemctl stop NetworkManager 2>/dev/null || true
+    msg_ok "network-manager установлен"
   fi
+}
 
-  # Теперь NM настроен — можно запускать
-  systemctl enable NetworkManager 2>/dev/null || true
-  systemctl restart NetworkManager 2>/dev/null || true
+# ============================================================================
+# CONFIGURE: Изменение параметров работающей сети
+# ============================================================================
 
-  # Даем NM пару секунд на запуск и подключаем WiFi (если выбран и безопасно)
-  sleep 2
-  setup_wifi
-
+# Применение статического IP через nmcli
+configure_static_ip() {
   if [ "$OPT_STATIC_IP" = true ] && [ -n "$STATIC_IP" ]; then
-    sleep 3
-    # Получаем UUID активного подключения для назначения статического IP.
-    # Сначала определяем интерфейс по умолчанию, затем получаем его UUID напрямую.
-    # UUID надежнее имени, так как имена могут дублироваться или содержать спецсимволы.
     local active_iface
     active_iface=$(ip route list default 2>/dev/null | awk '{print $5}' | head -1)
     local target_uuid=""
@@ -3129,7 +3136,6 @@ step_configure_network() {
         ipv4.gateway "$STATIC_GW" ipv4.dns "$STATIC_DNS" ipv4.method manual 2>/dev/null
       nmcli con up "$target_uuid" 2>/dev/null
       
-      # Получим имя подключения для красивого вывода в лог
       local target_con_name
       target_con_name=$(nmcli -g NAME con show "$target_uuid" 2>/dev/null)
       msg_ok "Стат. IP: ${STATIC_IP}/${pf} (${target_con_name:-$target_uuid})"
@@ -3137,17 +3143,74 @@ step_configure_network() {
       msg_warn "Не удалось применить статический IP: активное подключение не найдено"
     fi
   fi
+}
 
-  local r=0 ni=""
-  while [ $r -lt 6 ]; do
-    sleep 5
+# ============================================================================
+# WAIT: Ожидание готовности сервисов
+# ============================================================================
+
+# Ожидание появления IP-адреса после переключения на NM
+wait_network_online() {
+  local to="${1:-30}" el=0 ni=""
+  while [ $el -lt $to ]; do
+    sleep 5; el=$((el+5))
     ni=$(hostname -I 2>/dev/null | awk '{print $1}')
-    [ -n "$ni" ] && { msg_ok "Сеть: ${ni}"; break; }
-    r=$((r+1))
+    if [ -n "$ni" ]; then
+      msg_ok "Сеть: ${ni}"
+      return 0
+    fi
   done
+  
+  # Если вышли по таймауту
+  msg_error "Сеть не появилась после переключения на NetworkManager"
+  return 1
+}
 
-    if [ $r -ge 6 ]; then
-    msg_error "Сеть не появилась после переключения на NetworkManager"
+# ============================================================================
+# ШАГ: СЕТЬ
+# ============================================================================
+step_configure_network() {
+  local sid="network"; is_done "$sid" && return 0
+  header "[${CURRENT_STEP_NUM}/${TOTAL_STEPS}] НАСТРОЙКА СЕТИ"
+
+  push_rollback 'rollback_network'
+
+  local cip; cip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  [ -n "$cip" ] && msg_info "Текущий IP: ${cip}"
+
+  # 1. Подготовка конфигов и отключение ifupdown
+  setup_network_configs
+
+  # 2. Защита SSH-сессии (пауза перед переключением)
+  if who 2>/dev/null | grep -q pts; then
+    msg_warn "SSH-сессия! Переключение сети..."
+    if [ "$SILENT" = true ] || [ "$DRY_RUN" = true ]; then
+      msg_dim "Silent/dry-run режим: пауза пропущена"
+    elif [ -n "$FROM_STEP" ]; then
+      msg_dim "Продолжение после reboot: пауза пропущена"
+    else
+      msg_dim "Пауза 15с для завершения активных SSH операций..."
+      sleep 15
+    fi
+  fi
+
+  # 3. Установка NetworkManager если отсутствует
+  install_network_manager || return 1
+
+  # 4. Запуск NetworkManager
+  systemctl enable NetworkManager 2>/dev/null || true
+  systemctl restart NetworkManager 2>/dev/null || true
+  sleep 2
+
+  # 5. Настройка WiFi (вызов существующей функции)
+  setup_wifi
+
+  # 6. Настройка статического IP
+  configure_static_ip
+
+  # 7. Ожидание появления IP
+  if ! wait_network_online 30; then
+    # Если сеть не появилась - пробуем откат
     if rollback_network; then
       msg_ok "Откат выполнен успешно"
     else
@@ -3159,18 +3222,8 @@ step_configure_network() {
     fi
   fi
 
-  # Отключение энергосбережения Wi-Fi для стабильности VPN (Tailscale)
-  # Срабатывает даже если Wi-Fi был настроен ранее, а не через визард скрипта
-  local wifi_dev_power
-  wifi_dev_power=$(nmcli -t -f DEVICE,TYPE dev status 2>/dev/null | grep ':wifi$' | head -1 | cut -d: -f1)
-  if [ -n "$wifi_dev_power" ]; then
-    local wifi_uuid_power
-    wifi_uuid_power=$(nmcli -g GENERAL.CON-UUID dev show "$wifi_dev_power" 2>/dev/null)
-    if [ -n "$wifi_uuid_power" ]; then
-      nmcli con modify "$wifi_uuid_power" 802-11-wireless.powersave 2 2>/dev/null || true
-      msg_dim "Wi-Fi Power Save: отключен"
-    fi
-  fi
+  # 8. Фикс энергосбережения WiFi
+  apply_wifi_powersave_fix
 
   mark_done "$sid"
 }
