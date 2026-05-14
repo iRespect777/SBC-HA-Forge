@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
 # Home Assistant Supervised - ULTIMATE INSTALLER
-# Version: 20.9
+# Version: 20.9.1
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/HAS-tvbox
@@ -11,7 +11,7 @@ if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
 fi
 
-readonly SCRIPT_VERSION="20.9"
+readonly SCRIPT_VERSION="20.9.1"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly INSTALLER_REPO="mediahome/ha-installer"
 readonly HA_INSTALLER_DIR="/var/lib/ha-installer"
@@ -2367,31 +2367,67 @@ show_modules_menu() {
     if command -v whiptail &>/dev/null; then
       mod=$(whiptail --title "Модули и Фичи" --menu \
         "Выберите модуль для установки.\nЯдро Home Assistant затронуто НЕ БУДЕТ." \
-        20 65 10 \
-        "tailscale"  "Tailscale VPN + фикс Wi-Fi" \
-        "cloudflare" "Cloudflare Tunnel (публичный HTTPS)" \
-        "security"   "UFW (безопасные правила) + SSH" \
-        "back"       "Назад в главное меню" \
+        26 70 17 \
+        "== СИСТЕМА ==" "" \
+        "zram"          "ZRAM Swap (сжатие в RAM)" \
+        "emmc"          "Оптимизация eMMC (noatime, логи)" \
+        "usbpower"      "USB питание (отключение спящего режима)" \
+        "== НАДЕЖНОСТЬ ==" "" \
+        "bootrecovery"  "Восстановление загрузки (проверка Docker/FS)" \
+        "watchdog"      "Watchdog (авто-перезапуск HA + алерты)" \
+        "== РЕЗЕРВНОЕ КОПИРОВАНИЕ ==" "" \
+        "backups"       "Бэкапы (локальные + CLI снапшоты)" \
+        "== ИНТЕГРАЦИИ ==" "" \
+        "hacs"          "HACS (магазин кастом компонентов)" \
+        "mdns"          "mDNS (доступ по homeassistant.local)" \
+        "== СЕТЬ И БЕЗОПАСНОСТЬ ==" "" \
+        "tailscale"     "Tailscale VPN (удал. доступ)" \
+        "cloudflare"    "Cloudflare Tunnel (публичный HTTPS)" \
+        "security"      "UFW (безопасные правила) + SSH" \
+        "== МОНИТОРИНГ ==" "" \
+        "monitoring"    "Prometheus Node Exporter метрики" \
+        "back"          "Назад в главное меню" \
         3>&1 1>&2 2>&3) || return 1
     else
       mod=$(text_menu "Модули и Фичи" "Выберите:" \
-        "tailscale"  "Tailscale VPN" \
-        "cloudflare" "Cloudflare Tunnel" \
-        "security"   "Безопасность (UFW)" \
-        "back"       "Назад") || return 1
+        "zram"          "ZRAM Swap" \
+        "emmc"          "Оптимизация eMMC" \
+        "usbpower"      "USB питание" \
+        "bootrecovery"  "Восст. загрузки" \
+        "watchdog"      "Watchdog" \
+        "backups"       "Бэкапы" \
+        "hacs"          "HACS" \
+        "mdns"          "mDNS (Avahi)" \
+        "tailscale"     "Tailscale VPN" \
+        "cloudflare"    "Cloudflare Tunnel" \
+        "security"      "Безопасность (UFW)" \
+        "monitoring"    "Мониторинг (Prometheus)" \
+        "back"          "Назад") || return 1
     fi
 
     [ -z "$mod" ] && return 1
     [ "$mod" = "back" ] && return 0
+    # Пропускаем заголовки групп в whiptail
+    [[ "$mod" =~ ^==.*==$ ]] && continue
 
     detect_system_info
     setup_dirs
+    load_config
     acquire_lock
     
     case "$mod" in
-      tailscale)  module_tailscale ;;
-      cloudflare) module_cloudflare ;;
-      security)   module_security ;;
+      zram)          module_zram ;;
+      emmc)          module_emmc ;;
+      usbpower)      module_usb_power ;;
+      bootrecovery)  module_boot_recovery ;;
+      watchdog)      module_watchdog ;;
+      backups)       module_backups ;;
+      hacs)          module_hacs ;;
+      mdns)          module_mdns ;;
+      tailscale)     module_tailscale ;;
+      cloudflare)    module_cloudflare ;;
+      security)      module_security ;;
+      monitoring)    module_monitoring ;;
     esac
     
     release_lock
@@ -2430,6 +2466,86 @@ module_security() {
     local ans; read -r ans
     ([ "$ans" = "y" ] || [ "$ans" = "Y" ] || [ "$ans" = "д" ] || [ "$ans" = "Д" ]) && apply_ssh_hardening
   fi
+}
+
+module_zram() {
+  header "МОДУЛЬ: ZRAM SWAP"
+  if is_armbian && is_pkg_installed armbian-zram-config; then
+    msg_ok "ZRAM уже настроен Armbian"
+  else
+    setup_zram
+  fi
+}
+
+module_emmc() {
+  header "МОДУЛЬ: ОПТИМИЗАЦИЯ EMMC"
+  apply_emmc_tuning
+}
+
+module_usb_power() {
+  header "МОДУЛЬ: USB ПИТАНИЕ"
+  apply_usb_power_fix
+}
+
+module_watchdog() {
+  header "МОДУЛЬ: WATCHDOG"
+  # Watchdog требует ha-notify для отправки алертов
+  setup_ha_secrets
+  [ ! -f /usr/local/bin/ha-notify ] && setup_script_notify
+  setup_script_watchdog
+  OPT_WATCHDOG=true
+  configure_cron
+  msg_ok "Модуль Watchdog активирован"
+}
+
+module_backups() {
+  header "МОДУЛЬ: БЭКАПЫ"
+  setup_script_backups
+  OPT_BACKUP=true
+  configure_cron
+  msg_ok "Модуль Бэкапов активирован"
+}
+
+module_hacs() {
+  header "МОДУЛЬ: HACS"
+  # HACS требует запущенный контейнер
+  if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^homeassistant$'; then
+    msg_error "Контейнер homeassistant не запущен! HACS можно установить только на работающий HA."
+    return 1
+  fi
+  wait_ha_config_init 300 || { msg_error "HA не инициализирован"; return 1; }
+  configure_docker_dns
+  if install_hacs; then
+    msg_ok "HACS установлен!"
+    msg_info "Не забудьте добавить интеграцию HACS в интерфейсе HA"
+  else
+    msg_warn "Автоустановка HACS не удалась"
+  fi
+}
+
+module_boot_recovery() {
+  header "МОДУЛЬ: ВОССТАНОВЛЕНИЕ ЗАГРУЗКИ"
+  setup_script_boot_check
+  msg_ok "Модуль восстановления загрузки активирован"
+}
+
+module_monitoring() {
+  header "МОДУЛЬ: МОНИТОРИНГ (PROMETHEUS)"
+  apt_safe install -y jq >/dev/null 2>&1 || true # Требуется для метрик
+  setup_script_metrics
+  OPT_MONITORING=true
+  configure_cron
+  msg_ok "Модуль мониторинга активирован"
+}
+
+module_mdns() {
+  header "МОДУЛЬ: MDNS (AVAHI)"
+  if ! is_pkg_installed avahi-daemon; then
+    apt_safe install -y avahi-daemon >/dev/null 2>&1 || { msg_error "Не удалось установить avahi-daemon"; return 1; }
+  fi
+  systemctl enable avahi-daemon >/dev/null 2>&1 || true
+  systemctl start avahi-daemon >/dev/null 2>&1 || true
+  msg_ok "mDNS (Avahi) настроен. HA доступен по адресу http://homeassistant.local:8123"
 }
 
 # ============================================================================
