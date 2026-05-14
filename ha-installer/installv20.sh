@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
 # Home Assistant Supervised - ULTIMATE INSTALLER
-# Version: 20.6
+# Version: 20.7
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/HAS-tvbox
@@ -11,7 +11,7 @@ if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
 fi
 
-readonly SCRIPT_VERSION="20.6"
+readonly SCRIPT_VERSION="20.7"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly INSTALLER_REPO="mediahome/ha-installer"
 readonly HA_INSTALLER_DIR="/var/lib/ha-installer"
@@ -4404,66 +4404,55 @@ step_extras() {
 }
 
 # ============================================================================
-# ШАГ: HACS
+# WAIT: Ожидание готовности HA
 # ============================================================================
-step_hacs() {
-  local sid="hacs"; is_done "$sid" && return 0
-  header "[${CURRENT_STEP_NUM}/${TOTAL_STEPS}] HACS"
 
-  if [ "$OPT_HACS" != true ]; then
-    msg_warn "Пропущен"
-    mark_done "$sid"
-    return 0
-  fi
-
-  msg_dim "HACS: внешний код с https://get.hacs.xyz"
-
-  # Ожидание контейнера homeassistant (до 20 минут)
+# wait_: Ожидание запуска контейнера homeassistant
+wait_ha_core_container() {
+  local to="${1:-1200}" el=0
   msg_action "Ожидание контейнера homeassistant..."
-  local cw=0
   while ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^homeassistant$'; do
-    sleep 10; cw=$((cw+10))
-    [ $((cw%60)) -eq 0 ] && msg_dim "Ожидание контейнера... ${cw}с"
-    [ $cw -gt 1200 ] && {
-      msg_warn "Контейнер не появился за 20 минут."
-      msg_dim "Установите HACS позже:"
-      msg_dim "  docker exec homeassistant bash -c 'wget -qO- https://get.hacs.xyz|bash -'"
-      msg_dim "  docker restart homeassistant"
-      mark_done "$sid"
-      return 0
-    }
+    sleep 10; el=$((el+10))
+    [ $((el%60)) -eq 0 ] && msg_dim "Ожидание контейнера... ${el}с"
+    [ $el -ge $to ] && { msg_warn "Контейнер не появился за $((to/60)) мин."; return 1; }
   done
   msg_ok "Контейнер homeassistant запущен"
+  return 0
+}
 
-  # Ожидание /config/configuration.yaml (до 10 минут)
+# wait_: Ожидание создания configuration.yaml внутри контейнера
+wait_ha_config_init() {
+  local to="${1:-600}" el=0
   msg_action "Ожидание инициализации HA..."
-  local iw=0
   while ! docker exec homeassistant ls /config/configuration.yaml &>/dev/null; do
-    sleep 10; iw=$((iw+10))
-    [ $((iw%60)) -eq 0 ] && msg_dim "Ожидание /config/... ${iw}с"
-    [ $iw -gt 600 ] && {
-      msg_warn "configuration.yaml не появился за 10 минут."
-      msg_dim "Установите HACS позже вручную."
-      mark_done "$sid"
-      return 0
-    }
+    sleep 10; el=$((el+10))
+    [ $((el%60)) -eq 0 ] && msg_dim "Ожидание /config/... ${el}с"
+    [ $el -ge $to ] && { msg_warn "configuration.yaml не появился за $((to/60)) мин."; return 1; }
   done
   msg_ok "HA инициализирован"
+  return 0
+}
 
-  # Проверка DNS внутри контейнера
-    if ! docker exec homeassistant wget -q --spider --timeout=5 https://github.com 2>/dev/null && \
+# ============================================================================
+# CONFIGURE: Настройка среды для HACS
+# ============================================================================
+
+# configure_: Исправление DNS внутри контейнера при необходимости
+configure_docker_dns() {
+  if ! docker exec homeassistant wget -q --spider --timeout=5 https://github.com 2>/dev/null && \
      ! docker exec homeassistant python3 -c "import urllib.request; urllib.request.urlopen('https://github.com', timeout=5)" 2>/dev/null; then
     msg_warn "DNS не работает внутри контейнера, исправление..."
+    mkdir -p /etc/docker
     if [ -f /etc/docker/daemon.json ] && command -v jq &>/dev/null; then
       jq '. + {"dns": ["8.8.8.8", "1.1.1.1"]}' /etc/docker/daemon.json > /tmp/dj.tmp 2>/dev/null && \
         mv /tmp/dj.tmp /etc/docker/daemon.json
     elif [ ! -f /etc/docker/daemon.json ]; then
-      mkdir -p /etc/docker
       echo '{"log-driver":"journald","storage-driver":"overlay2","dns":["8.8.8.8","1.1.1.1"]}' > /etc/docker/daemon.json
     else
       msg_dim "jq не установлен — DNS в daemon.json не добавлен"
     fi
     systemctl restart docker 2>/dev/null || true
+    
     # Ждём контейнер после рестарта Docker
     local dw=0
     while ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^homeassistant$'; do
@@ -4473,43 +4462,27 @@ step_hacs() {
     # Повторная проверка DNS
     docker exec homeassistant ping -c1 -W5 github.com &>/dev/null && msg_ok "DNS исправлен" || msg_warn "DNS всё ещё не работает"
   fi
+}
 
-  # Установка HACS — три способа
+# ============================================================================
+# INSTALL: Установка HACS
+# ============================================================================
+
+# install_: Попытка установки HACS (3 способа с таймаутами)
+install_hacs() {
   msg_action "Установка HACS..."
   local hacs_ok=false
 
   # Способ 1: wget внутри контейнера
-  if [ "$hacs_ok" = false ] && \
-     docker exec homeassistant which wget &>/dev/null; then
+  if [ "$hacs_ok" = false ] && docker exec homeassistant which wget &>/dev/null; then
     msg_dim "Способ 1: wget..."
-    docker exec homeassistant bash -c \
-      "wget -q -O- https://get.hacs.xyz | bash -" \
-      >/dev/null 2>&1 &
-    local hp=$!
-    local hw=0
+    docker exec homeassistant bash -c "wget -q -O- https://get.hacs.xyz | bash -" >/dev/null 2>&1 &
+    local hp=$! hw=0
     while kill -0 "$hp" 2>/dev/null; do
-      sleep 5
-      hw=$((hw + 5))
+      sleep 5; hw=$((hw + 5))
       if [ $hw -ge 180 ]; then
-        # kill "$hp" убивает только docker exec на хосте.
-        # Процесс внутри контейнера продолжит работу без этого блока.
         kill "$hp" 2>/dev/null || true
-        # Останавливаем процессы внутри контейнера.
-        # pkill может отсутствовать — пробуем оба способа.
-        # ВАЖНО: в ps aux поле $2 это PID, не $1 (это USER).
-        docker exec homeassistant bash -c "
-          if command -v pkill >/dev/null 2>&1; then
-            pkill -f 'get.hacs.xyz' 2>/dev/null || true
-            pkill wget 2>/dev/null || true
-          fi
-          if command -v ps >/dev/null 2>&1; then
-            ps aux 2>/dev/null \
-              | grep -E 'get.hacs|wget' \
-              | grep -v grep \
-              | awk '{print \$2}' \
-              | xargs -r kill 2>/dev/null || true
-          fi
-        " 2>/dev/null || true
+        docker exec homeassistant bash -c "if command -v pkill >/dev/null 2>&1; then pkill -f 'get.hacs.xyz' 2>/dev/null || true; pkill wget 2>/dev/null || true; fi; if command -v ps >/dev/null 2>&1; then ps aux 2>/dev/null | grep -E 'get.hacs|wget' | grep -v grep | awk '{print \$2}' | xargs -r kill 2>/dev/null || true; fi" 2>/dev/null || true
         break
       fi
     done
@@ -4517,32 +4490,15 @@ step_hacs() {
   fi
 
   # Способ 2: curl внутри контейнера
-  if [ "$hacs_ok" = false ] && \
-     docker exec homeassistant which curl &>/dev/null; then
+  if [ "$hacs_ok" = false ] && docker exec homeassistant which curl &>/dev/null; then
     msg_dim "Способ 2: curl..."
-    docker exec homeassistant bash -c \
-      "curl -fsSL https://get.hacs.xyz | bash -" \
-      >/dev/null 2>&1 &
-    local hp=$!
-    local hw=0
+    docker exec homeassistant bash -c "curl -fsSL https://get.hacs.xyz | bash -" >/dev/null 2>&1 &
+    local hp=$! hw=0
     while kill -0 "$hp" 2>/dev/null; do
-      sleep 5
-      hw=$((hw + 5))
+      sleep 5; hw=$((hw + 5))
       if [ $hw -ge 180 ]; then
         kill "$hp" 2>/dev/null || true
-        docker exec homeassistant bash -c "
-          if command -v pkill >/dev/null 2>&1; then
-            pkill -f 'get.hacs.xyz' 2>/dev/null || true
-            pkill curl 2>/dev/null || true
-          fi
-          if command -v ps >/dev/null 2>&1; then
-            ps aux 2>/dev/null \
-              | grep -E 'get.hacs|curl' \
-              | grep -v grep \
-              | awk '{print \$2}' \
-              | xargs -r kill 2>/dev/null || true
-          fi
-        " 2>/dev/null || true
+        docker exec homeassistant bash -c "if command -v pkill >/dev/null 2>&1; then pkill -f 'get.hacs.xyz' 2>/dev/null || true; pkill curl 2>/dev/null || true; fi; if command -v ps >/dev/null 2>&1; then ps aux 2>/dev/null | grep -E 'get.hacs|curl' | grep -v grep | awk '{print \$2}' | xargs -r kill 2>/dev/null || true; fi" 2>/dev/null || true
         break
       fi
     done
@@ -4565,9 +4521,49 @@ step_hacs() {
     fi
   fi
 
-  # Результат
+  # Финальная проверка и перезапуск контейнера
   if [ "$hacs_ok" = true ] && docker exec homeassistant ls /config/custom_components/hacs &>/dev/null; then
     docker restart homeassistant >/dev/null 2>&1
+    return 0
+  else
+    return 1
+  fi
+}
+
+# ============================================================================
+# ШАГ: HACS
+# ============================================================================
+step_hacs() {
+  local sid="hacs"; is_done "$sid" && return 0
+  header "[${CURRENT_STEP_NUM}/${TOTAL_STEPS}] HACS"
+
+  if [ "$OPT_HACS" != true ]; then
+    msg_warn "Пропущен"
+    mark_done "$sid"
+    return 0
+  fi
+
+  msg_dim "HACS: внешний код с https://get.hacs.xyz"
+
+  # 1. Ожидание контейнера
+  if ! wait_ha_core_container 1200; then
+    msg_dim "Установите HACS позже: docker exec homeassistant bash -c 'wget -qO- https://get.hacs.xyz|bash -'"
+    mark_done "$sid"
+    return 0
+  fi
+
+  # 2. Ожидание инициализации
+  if ! wait_ha_config_init 600; then
+    msg_dim "Установите HACS позже вручную."
+    mark_done "$sid"
+    return 0
+  fi
+
+  # 3. Проверка и исправление DNS
+  configure_docker_dns
+
+  # 4. Установка
+  if install_hacs; then
     msg_ok "HACS установлен!"
     separator
     msg_info "Для активации HACS:"
