@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
 # Home Assistant Supervised - ULTIMATE INSTALLER
-# Version: 20.5
+# Version: 20.6
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/HAS-tvbox
@@ -11,7 +11,7 @@ if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
 fi
 
-readonly SCRIPT_VERSION="20.5"
+readonly SCRIPT_VERSION="20.6"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly INSTALLER_REPO="mediahome/ha-installer"
 readonly HA_INSTALLER_DIR="/var/lib/ha-installer"
@@ -3341,6 +3341,90 @@ detect_boot_dir() {
 }
 
 # ============================================================================
+# SETUP: Настройка конфигурации загрузчика
+# ============================================================================
+
+# setup_: Патчинг файлов загрузчика для включения AppArmor и настройка fstab
+setup_bootloader_apparmor() {
+  msg_info "Каталог загрузчика: ${BOOT_DIR}"
+  
+  local patched=false
+  local boot_files=()
+  
+  # Формируем список файлов на основе найденного каталога
+  [ -f "${BOOT_DIR}/armbianEnv.txt" ] && boot_files+=("${BOOT_DIR}/armbianEnv.txt")
+  [ -f "${BOOT_DIR}/uEnv.txt" ] && boot_files+=("${BOOT_DIR}/uEnv.txt")
+  [ -f "${BOOT_DIR}/extlinux/extlinux.conf" ] && boot_files+=("${BOOT_DIR}/extlinux/extlinux.conf")
+
+  # Если файлы не найдены, пытаемся искать в /boot как фоллбэк
+  if [ ${#boot_files[@]} -eq 0 ] && [ "$BOOT_DIR" != "/boot" ]; then
+    msg_warn "Конфиги не найдены в ${BOOT_DIR}, проверяем /boot..."
+    BOOT_DIR="/boot"
+    [ -f "${BOOT_DIR}/armbianEnv.txt" ] && boot_files+=("${BOOT_DIR}/armbianEnv.txt")
+    [ -f "${BOOT_DIR}/uEnv.txt" ] && boot_files+=("${BOOT_DIR}/uEnv.txt")
+    [ -f "${BOOT_DIR}/extlinux/extlinux.conf" ] && boot_files+=("${BOOT_DIR}/extlinux/extlinux.conf")
+  fi
+
+  if [ ${#boot_files[@]} -eq 0 ]; then
+    msg_error "Конфиг загрузчика не найден!"
+    return 1
+  fi
+
+  # Патчим найденные файлы
+  for f in "${boot_files[@]}"; do
+    cp "$f" "${BACKUP_DIR}/$(basename "$f").bak" 2>/dev/null
+    grep -q "apparmor=1" "$f" && { patched=true; continue; }
+
+    if [[ "$f" == *extlinux.conf ]]; then
+      sed -i '/^[[:space:]]*append/ s/$/ apparmor=1 security=apparmor/' "$f"
+    else
+      grep -q "^extraargs=" "$f" && \
+        sed -i 's|^extraargs=.*|& apparmor=1 security=apparmor|' "$f" || \
+        echo "extraargs=apparmor=1 security=apparmor" >> "$f"
+    fi
+    msg_ok "$(basename "$f") пропатчен"
+    patched=true
+  done
+
+  # Если загрузчик был примонтирован временно, добавляем партицию в fstab
+  if [ -n "$BOOT_DEV_FSTAB" ]; then
+    local fstype
+    fstype=$(lsblk -nlo FSTYPE "$BOOT_DEV_FSTAB" 2>/dev/null | head -1)
+    
+    if [ -n "$fstype" ]; then
+      msg_action "Добавляем партицию загрузчика в /etc/fstab для монтирования при старте..."
+      if ! grep -q "$BOOT_DEV_FSTAB" /etc/fstab 2>/dev/null; then
+        local mount_point="/boot"
+        if grep -q " /boot " /etc/fstab 2>/dev/null; then
+          mount_point="/media/boot"
+          mkdir -p "$mount_point"
+        fi
+        
+        local dev_uuid
+        dev_uuid=$(blkid -s UUID -o value "$BOOT_DEV_FSTAB" 2>/dev/null)
+        
+        if [ -n "$dev_uuid" ]; then
+          echo "UUID=$dev_uuid $mount_point $fstype defaults,noatime 0 2" >> /etc/fstab
+          msg_ok "Партиция добавлена в fstab (монтируется в $mount_point)"
+        else
+          msg_warn "Не удалось определить UUID $BOOT_DEV_FSTAB. Пропуск добавления в fstab (небезопасно)"
+        fi
+      else
+        msg_dim "Партиция уже присутствует в fstab"
+      fi
+    else
+      msg_warn "Не удалось определить ФС для fstab"
+    fi
+  fi
+
+  if [ "$patched" != true ]; then
+    return 1
+  fi
+  
+  return 0
+}
+
+# ============================================================================
 # ШАГ: APPARMOR
 # ============================================================================
 step_configure_apparmor() {
@@ -3362,88 +3446,19 @@ step_configure_apparmor() {
 
     # Определяем каталог загрузчика
     detect_boot_dir
-    msg_info "Каталог загрузчика: ${BOOT_DIR}"
 
-    local patched=false
-    
-    # Формируем список файлов на основе найденного каталога
-    local boot_files=()
-    [ -f "${BOOT_DIR}/armbianEnv.txt" ] && boot_files+=("${BOOT_DIR}/armbianEnv.txt")
-    [ -f "${BOOT_DIR}/uEnv.txt" ] && boot_files+=("${BOOT_DIR}/uEnv.txt")
-    [ -f "${BOOT_DIR}/extlinux/extlinux.conf" ] && boot_files+=("${BOOT_DIR}/extlinux/extlinux.conf")
-
-    # Если файлы не найдены, пытаемся искать в /boot как фоллбэк
-    if [ ${#boot_files[@]} -eq 0 ] && [ "$BOOT_DIR" != "/boot" ]; then
-        msg_warn "Конфиги не найдены в ${BOOT_DIR}, проверяем /boot..."
-        BOOT_DIR="/boot"
-        [ -f "${BOOT_DIR}/armbianEnv.txt" ] && boot_files+=("${BOOT_DIR}/armbianEnv.txt")
-        [ -f "${BOOT_DIR}/uEnv.txt" ] && boot_files+=("${BOOT_DIR}/uEnv.txt")
-        [ -f "${BOOT_DIR}/extlinux/extlinux.conf" ] && boot_files+=("${BOOT_DIR}/extlinux/extlinux.conf")
-    fi
-
-    if [ ${#boot_files[@]} -eq 0 ]; then
-        msg_error "Конфиг загрузчика не найден!"
+    # Патчим загрузчик (setup_)
+    if ! setup_bootloader_apparmor; then
+        msg_error "Не удалось пропатчить загрузчик"
         msg_dim "AppArmor не будет активен. HA может работать с предупреждениями."
-        mark_done "$sid"
-        return 0
-    fi
-
-    for f in "${boot_files[@]}"; do
-        cp "$f" "${BACKUP_DIR}/$(basename "$f").bak" 2>/dev/null
-        grep -q "apparmor=1" "$f" && { patched=true; continue; }
-
-        if [[ "$f" == *extlinux.conf ]]; then
-            sed -i '/^[[:space:]]*append/ s/$/ apparmor=1 security=apparmor/' "$f"
-        else
-            grep -q "^extraargs=" "$f" && \
-                sed -i 's|^extraargs=.*|& apparmor=1 security=apparmor|' "$f" || \
-                echo "extraargs=apparmor=1 security=apparmor" >> "$f"
-        fi
-        msg_ok "$(basename "$f") пропатчен"
-        patched=true
-    done
-
-    # Если загрузчик был примонтирован временно, добавляем партицию в fstab
-    if [ -n "$BOOT_DEV_FSTAB" ]; then
-      local fstype
-      fstype=$(lsblk -nlo FSTYPE "$BOOT_DEV_FSTAB" 2>/dev/null | head -1)
-      
-      if [ -n "$fstype" ]; then
-        msg_action "Добавляем партицию загрузчика в /etc/fstab для монтирования при старте..."
-        if ! grep -q "$BOOT_DEV_FSTAB" /etc/fstab 2>/dev/null; then
-          local mount_point="/boot"
-          if grep -q " /boot " /etc/fstab 2>/dev/null; then
-            mount_point="/media/boot"
-            mkdir -p "$mount_point"
-          fi
-          
-          local dev_uuid
-          dev_uuid=$(blkid -s UUID -o value "$BOOT_DEV_FSTAB" 2>/dev/null)
-          
-          # ВАЖНО: Добавляем ТОЛЬКО по UUID. Добавление по /dev/mmcblkX на ARM небезопасно!
-          if [ -n "$dev_uuid" ]; then
-            echo "UUID=$dev_uuid $mount_point $fstype defaults,noatime 0 2" >> /etc/fstab
-            msg_ok "Партиция добавлена в fstab (монтируется в $mount_point)"
-          else
-            msg_warn "Не удалось определить UUID $BOOT_DEV_FSTAB. Пропуск добавления в fstab (небезопасно)"
-          fi
-        else
-          msg_dim "Партиция уже присутствует в fstab"
-        fi
-      else
-        msg_warn "Не удалось определить ФС для fstab"
-      fi
-    fi
-
-    if [ "$patched" != true ]; then
-        msg_error "Конфиг загрузчика не найден!"
-        msg_dim "AppArmor не будет активен. HA может работать с предупреждениями."
+        systemctl enable apparmor 2>/dev/null || true
         mark_done "$sid"
         return 0
     fi
 
     msg_warn "Требуется перезагрузка для активации AppArmor"
 
+    # Обработка перезагрузки
     if [ "$OPT_AUTO_REBOOT" = true ]; then
         msg_action "Настройка продолжения после перезагрузки..."
         if setup_reboot_continue "apparmor"; then
