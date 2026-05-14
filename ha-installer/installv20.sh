@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
 # Home Assistant Supervised - ULTIMATE INSTALLER
-# Version: 20.7
+# Version: 20.8
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/HAS-tvbox
@@ -11,7 +11,7 @@ if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
 fi
 
-readonly SCRIPT_VERSION="20.7"
+readonly SCRIPT_VERSION="20.8"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly INSTALLER_REPO="mediahome/ha-installer"
 readonly HA_INSTALLER_DIR="/var/lib/ha-installer"
@@ -4671,272 +4671,180 @@ do_check() {
   echo ""
 }
 
+# ============================================================================
+# APPLY: Разовые фиксы среды (Rescue Mode)
+# ============================================================================
+
+# apply_: Проверка и фикс файловой системы
+apply_rescue_filesystem() {
+  msg_action "[1/8] Файловая система..."
+  if ! touch /tmp/.ha_rescue_test 2>/dev/null; then
+    msg_error "Файловая система readonly!"
+    msg_dim "Попытка: mount -o remount,rw /"
+    mount -o remount,rw / 2>/dev/null || true
+    if touch /tmp/.ha_rescue_test 2>/dev/null; then
+      msg_ok "ФС перемонтирована в rw"; rm -f /tmp/.ha_rescue_test; return 2
+    else
+      rm -f /tmp/.ha_rescue_test 2>/dev/null; msg_error "Не удалось перемонтировать ФС"; return 1
+    fi
+  fi
+  rm -f /tmp/.ha_rescue_test 2>/dev/null
+  if dmesg 2>/dev/null | tail -200 | grep -qi "ext4.*error\|I/O error"; then
+    msg_warn "Ошибки ФС в dmesg!"; msg_dim "Рекомендуется: fsck после загрузки с USB"; return 1
+  fi
+  msg_ok "ФС: OK (rw)"; return 0
+}
+
+# apply_: Проверка и очистка места на диске
+apply_rescue_disk_space() {
+  msg_action "[2/8] Место на диске..."
+  local avail; avail=$(df -m / | awk 'NR==2{print $4}')
+  if [ "${avail:-0}" -lt 500 ]; then
+    msg_error "Критически мало места: ${avail}МБ"; msg_action "Экстренная очистка..."
+    journalctl --vacuum-size=20M 2>/dev/null || true; apt-get clean 2>/dev/null || true
+    command -v docker &>/dev/null && docker system prune -f 2>/dev/null || true
+    find /tmp -type f -mtime +1 -delete 2>/dev/null || true
+    local log_count; log_count=$(ls /var/log/ha_install_*.log 2>/dev/null | wc -l)
+    [ "${log_count:-0}" -gt 3 ] && ls -1t /var/log/ha_install_*.log 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null
+    local after; after=$(df -m / | awk 'NR==2{print $4}')
+    msg_ok "Освобождено: ${avail}МБ → ${after}МБ"; return 2
+  fi
+  msg_ok "Диск: ${avail}МБ свободно"; return 0
+}
+
+# apply_: Проверка и восстановление сети
+apply_rescue_network() {
+  msg_action "[3/8] Сеть..."
+  local ip; ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  if [ -z "$ip" ]; then
+    msg_error "Нет IP-адреса!"; msg_action "Восстановление сети..."
+    if command -v nmcli &>/dev/null; then systemctl restart NetworkManager 2>/dev/null || true; sleep 5; ip=$(hostname -I 2>/dev/null | awk '{print $1}'); fi
+    if [ -z "$ip" ]; then
+      local iface; iface=$(ip -o link show 2>/dev/null | awk -F': ' '!/lo/{print $2; exit}' | cut -d'@' -f1)
+      if [ -n "$iface" ]; then
+        ip link set "$iface" up 2>/dev/null || true
+        if command -v dhclient &>/dev/null; then dhclient "$iface" 2>/dev/null || true
+        elif command -v udhcpc &>/dev/null; then udhcpc -i "$iface" -q 2>/dev/null || true; fi
+        sleep 5; ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+      fi
+    fi
+    if [ -z "$ip" ]; then systemctl restart systemd-networkd 2>/dev/null || true; sleep 5; ip=$(hostname -I 2>/dev/null | awk '{print $1}'); fi
+    if [ -n "$ip" ]; then msg_ok "Сеть восстановлена: ${ip}"; return 2
+    else msg_error "Не удалось восстановить сеть"; return 1; fi
+  fi
+  msg_ok "Сеть: ${ip}"; return 0
+}
+
+# apply_: Проверка и фикс DNS
+apply_rescue_dns() {
+  msg_action "[4/8] DNS..."
+  if ! ping -c1 -W3 github.com &>/dev/null; then
+    if ping -c1 -W2 8.8.8.8 &>/dev/null; then
+      msg_warn "DNS не работает, исправление..."
+      if [ -s /etc/resolv.conf ] && grep -q "nameserver" /etc/resolv.conf 2>/dev/null; then
+        cp /etc/resolv.conf /etc/resolv.conf.rescue.bak 2>/dev/null
+      fi
+      rm -f /etc/resolv.conf 2>/dev/null; echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf; sleep 2
+      if ping -c1 -W3 github.com &>/dev/null; then msg_ok "DNS исправлен"; return 2
+      else msg_error "DNS всё ещё не работает"; return 1; fi
+    else
+      local ip; ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+      if [ -z "$ip" ]; then msg_error "Нет сети — DNS не проверить"; else msg_error "Нет доступа к интернету"; fi
+      return 1
+    fi
+  fi
+  msg_ok "DNS: OK"; return 0
+}
+
+# apply_: Проверка и перезапуск Docker
+apply_rescue_docker() {
+  msg_action "[5/8] Docker..."
+  if command -v docker &>/dev/null; then
+    if ! docker info &>/dev/null; then
+      msg_warn "Docker не отвечает"; msg_action "Перезапуск Docker..."
+      systemctl restart docker 2>/dev/null || true
+      local dw=0; while ! docker info &>/dev/null && [ $dw -lt 30 ]; do sleep 3; dw=$((dw+3)); done
+      if docker info &>/dev/null; then msg_ok "Docker восстановлен"; return 2
+      else msg_error "Docker не запускается"; msg_dim "Логи: journalctl -u docker -n 20"; return 1; fi
+    fi
+    local drv; drv=$(docker info --format '{{.Driver}}' 2>/dev/null || echo "?"); msg_ok "Docker: OK (${drv})"; return 0
+  fi
+  msg_error "Docker не установлен"; return 1
+}
+
+# apply_: Проверка и перезапуск Supervisor
+apply_rescue_supervisor() {
+  msg_action "[6/8] Supervisor..."
+  if systemctl list-unit-files hassio-supervisor.service &>/dev/null; then
+    if ! systemctl is-active --quiet hassio-supervisor 2>/dev/null; then
+      msg_warn "Supervisor не работает"; msg_action "Перезапуск Supervisor..."
+      if [ -f "$FAKED_OS_RELEASE" ]; then cp "$FAKED_OS_RELEASE" /etc/os-release 2>/dev/null; msg_dim "os-release подменён для supervisor"; fi
+      systemctl restart hassio-supervisor 2>/dev/null || true; sleep 15
+      if systemctl is-active --quiet hassio-supervisor 2>/dev/null; then msg_ok "Supervisor восстановлен"; return 2
+      else msg_error "Supervisor не запускается"; msg_dim "Логи: journalctl -u hassio-supervisor -n 30"; return 1; fi
+    fi
+    msg_ok "Supervisor: active"; return 0
+  fi
+  msg_warn "Supervisor не установлен"; return 0
+}
+
+# apply_: Проверка и запуск контейнера HA Core
+apply_rescue_ha_core() {
+  msg_action "[7/8] HA Core..."
+  if command -v docker &>/dev/null && docker info &>/dev/null; then
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^homeassistant$'; then
+      msg_warn "HA Core не запущен"
+      if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^homeassistant$'; then
+        msg_action "Запуск контейнера..."; docker start homeassistant 2>/dev/null || true; sleep 10
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^homeassistant$'; then msg_ok "HA Core запущен"; return 2
+        else msg_error "HA Core не запускается"; msg_dim "Логи: docker logs homeassistant --tail 30"; return 1; fi
+      else
+        msg_warn "Контейнер homeassistant не существует"; msg_dim "Supervisor должен создать его автоматически"
+        systemctl restart hassio-supervisor 2>/dev/null || true; return 1
+      fi
+    fi
+    local ha_status; ha_status=$(docker inspect -f '{{.State.Status}}' homeassistant 2>/dev/null || echo "?")
+    msg_ok "HA Core: ${ha_status}"
+    local hc; hc=$(curl -s -o /dev/null -w "%{http_code}" -m 5 http://localhost:8123 2>/dev/null || echo 000)
+    if [ "$hc" = "200" ] || [ "$hc" = "401" ]; then msg_ok "HA Web: OK (${hc})"
+    elif [ "$hc" = "000" ]; then msg_dim "HA Web: загружается (это нормально первые 10-15 минут)"
+    else msg_warn "HA Web: ${hc}"; fi
+    return 0
+  fi
+  return 1
+}
+
+# apply_: Проверка AppArmor
+apply_rescue_apparmor() {
+  msg_action "[8/8] AppArmor..."
+  local aa; aa=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null) || aa="N"
+  if [ "$aa" = "Y" ]; then
+    msg_ok "AppArmor: активен"
+    if ! systemctl is-active --quiet apparmor 2>/dev/null; then systemctl start apparmor 2>/dev/null || true; msg_dim "Сервис apparmor запущен"; return 2; fi
+    return 0
+  else
+    msg_warn "AppArmor: не активен в ядре"; msg_dim "Для активации: добавьте 'apparmor=1 security=apparmor' в загрузчик и перезагрузите"; return 1
+  fi
+}
+
 # =========================================================================
 # ОПЕРАЦИИ: РЕЖИМ ВОССТАНОВЛЕНИЯ
 # =========================================================================
 do_rescue() {
     header "РЕЖИМ ВОССТАНОВЛЕНИЯ"
-
     local fixes=0 errors=0
 
-    # --- 1. Файловая система ---
-    msg_action "[1/8] Файловая система..."
-    if ! touch /tmp/.ha_rescue_test 2>/dev/null; then
-        msg_error "Файловая система readonly!"
-        msg_dim "Попытка: mount -o remount,rw /"
-        mount -o remount,rw / 2>/dev/null || true
-        if touch /tmp/.ha_rescue_test 2>/dev/null; then
-            msg_ok "ФС перемонтирована в rw"
-            fixes=$((fixes+1))
-        else
-            msg_error "Не удалось перемонтировать ФС"
-            errors=$((errors+1))
-        fi
-    else
-        msg_ok "ФС: OK (rw)"
-    fi
-    rm -f /tmp/.ha_rescue_test 2>/dev/null
-
-    if dmesg 2>/dev/null | tail -200 | grep -qi "ext4.*error\|I/O error"; then
-        msg_warn "Ошибки ФС в dmesg!"
-        msg_dim "Рекомендуется: fsck после загрузки с USB"
-        errors=$((errors+1))
-    fi
-
-    # --- 2. Место на диске ---
-    msg_action "[2/8] Место на диске..."
-    local avail
-    avail=$(df -m / | awk 'NR==2{print $4}')
-    if [ "${avail:-0}" -lt 500 ]; then
-        msg_error "Критически мало места: ${avail}МБ"
-        msg_action "Экстренная очистка..."
-
-        # Логи
-        journalctl --vacuum-size=20M 2>/dev/null || true
-        # Apt кэш
-        apt-get clean 2>/dev/null || true
-        # Docker
-        command -v docker &>/dev/null && docker system prune -f 2>/dev/null || true
-        # Tmp
-        find /tmp -type f -mtime +1 -delete 2>/dev/null || true
-        # Старые логи установщика
-        local log_count
-        log_count=$(ls /var/log/ha_install_*.log 2>/dev/null | wc -l)
-        if [ "${log_count:-0}" -gt 3 ]; then
-            ls -1t /var/log/ha_install_*.log 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null
-        fi
-
-        local after
-        after=$(df -m / | awk 'NR==2{print $4}')
-        msg_ok "Освобождено: ${avail}МБ → ${after}МБ"
-        fixes=$((fixes+1))
-    else
-        msg_ok "Диск: ${avail}МБ свободно"
-    fi
-
-    # --- 3. Сеть ---
-    msg_action "[3/8] Сеть..."
-    local ip
-    ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-    if [ -z "$ip" ]; then
-        msg_error "Нет IP-адреса!"
-        msg_action "Восстановление сети..."
-
-        # Попытка 1: NetworkManager
-        if command -v nmcli &>/dev/null; then
-            systemctl restart NetworkManager 2>/dev/null || true
-            sleep 5
-            ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-        fi
-
-        # Попытка 2: ifupdown
-        if [ -z "$ip" ]; then
-            local iface
-            iface=$(ip -o link show 2>/dev/null | awk -F': ' '!/lo/{print $2; exit}' | cut -d'@' -f1)
-            if [ -n "$iface" ]; then
-                ip link set "$iface" up 2>/dev/null || true
-                if command -v dhclient &>/dev/null; then
-                    dhclient "$iface" 2>/dev/null || true
-                elif command -v udhcpc &>/dev/null; then
-                    udhcpc -i "$iface" -q 2>/dev/null || true
-                fi
-                sleep 5
-                ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-            fi
-        fi
-
-        # Попытка 3: systemd-networkd
-        if [ -z "$ip" ]; then
-            systemctl restart systemd-networkd 2>/dev/null || true
-            sleep 5
-            ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-        fi
-
-        if [ -n "$ip" ]; then
-            msg_ok "Сеть восстановлена: ${ip}"
-            fixes=$((fixes+1))
-        else
-            msg_error "Не удалось восстановить сеть"
-            msg_dim "Вручную:"
-            msg_dim "  ip link set eth0 up"
-            msg_dim "  dhclient eth0"
-            errors=$((errors+1))
-        fi
-    else
-        msg_ok "Сеть: ${ip}"
-    fi
-
-    # --- 4. DNS ---
-    msg_action "[4/8] DNS..."
-    if ! ping -c1 -W3 github.com &>/dev/null; then
-        if ping -c1 -W2 8.8.8.8 &>/dev/null; then
-            msg_warn "DNS не работает, исправление..."
-            # Сохранить текущий если не пустой
-            if [ -s /etc/resolv.conf ] && grep -q "nameserver" /etc/resolv.conf 2>/dev/null; then
-                cp /etc/resolv.conf /etc/resolv.conf.rescue.bak 2>/dev/null
-            fi
-            rm -f /etc/resolv.conf 2>/dev/null
-            echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
-            sleep 2
-            if ping -c1 -W3 github.com &>/dev/null; then
-                msg_ok "DNS исправлен"
-                fixes=$((fixes+1))
-            else
-                msg_error "DNS всё ещё не работает"
-                errors=$((errors+1))
-            fi
-        elif [ -z "$ip" ]; then
-            msg_error "Нет сети — DNS не проверить"
-        else
-            msg_error "Нет доступа к интернету"
-            errors=$((errors+1))
-        fi
-    else
-        msg_ok "DNS: OK"
-    fi
-
-    # --- 5. Docker ---
-    msg_action "[5/8] Docker..."
-    if command -v docker &>/dev/null; then
-        if ! docker info &>/dev/null; then
-            msg_warn "Docker не отвечает"
-            msg_action "Перезапуск Docker..."
-            systemctl restart docker 2>/dev/null || true
-
-            local dw=0
-            while ! docker info &>/dev/null && [ $dw -lt 30 ]; do
-                sleep 3; dw=$((dw+3))
-            done
-
-            if docker info &>/dev/null; then
-                msg_ok "Docker восстановлен"
-                fixes=$((fixes+1))
-            else
-                msg_error "Docker не запускается"
-                msg_dim "Логи: journalctl -u docker -n 20"
-                errors=$((errors+1))
-            fi
-        else
-            local drv
-            drv=$(docker info --format '{{.Driver}}' 2>/dev/null || echo "?")
-            msg_ok "Docker: OK (${drv})"
-        fi
-    else
-        msg_error "Docker не установлен"
-        errors=$((errors+1))
-    fi
-
-    # --- 6. HA Supervisor ---
-    msg_action "[6/8] Supervisor..."
-    if systemctl list-unit-files hassio-supervisor.service &>/dev/null; then
-        if ! systemctl is-active --quiet hassio-supervisor 2>/dev/null; then
-            msg_warn "Supervisor не работает"
-            msg_action "Перезапуск Supervisor..."
-
-            # Проверить os-release перед запуском
-            if [ -f "$FAKED_OS_RELEASE" ]; then
-                cp "$FAKED_OS_RELEASE" /etc/os-release 2>/dev/null
-                msg_dim "os-release подменён для supervisor"
-            fi
-
-            systemctl restart hassio-supervisor 2>/dev/null || true
-            sleep 15
-
-            if systemctl is-active --quiet hassio-supervisor 2>/dev/null; then
-                msg_ok "Supervisor восстановлен"
-                fixes=$((fixes+1))
-            else
-                msg_error "Supervisor не запускается"
-                msg_dim "Логи: journalctl -u hassio-supervisor -n 30"
-                errors=$((errors+1))
-            fi
-        else
-            msg_ok "Supervisor: active"
-        fi
-    else
-        msg_warn "Supervisor не установлен"
-    fi
-
-    # --- 7. HA Core контейнер ---
-    msg_action "[7/8] HA Core..."
-    if command -v docker &>/dev/null && docker info &>/dev/null; then
-        if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^homeassistant$'; then
-            msg_warn "HA Core не запущен"
-
-            # Проверить существует ли контейнер
-            if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^homeassistant$'; then
-                msg_action "Запуск контейнера..."
-                docker start homeassistant 2>/dev/null || true
-                sleep 10
-
-                if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^homeassistant$'; then
-                    msg_ok "HA Core запущен"
-                    fixes=$((fixes+1))
-                else
-                    msg_error "HA Core не запускается"
-                    msg_dim "Логи: docker logs homeassistant --tail 30"
-                    errors=$((errors+1))
-                fi
-            else
-                msg_warn "Контейнер homeassistant не существует"
-                msg_dim "Supervisor должен создать его автоматически"
-                # Перезапустить supervisor чтобы пересоздал
-                systemctl restart hassio-supervisor 2>/dev/null || true
-                msg_dim "Supervisor перезапущен, ожидайте 5-10 минут"
-            fi
-        else
-            local ha_status
-            ha_status=$(docker inspect -f '{{.State.Status}}' homeassistant 2>/dev/null || echo "?")
-            msg_ok "HA Core: ${ha_status}"
-
-            # Проверить HTTP
-            local hc
-            hc=$(curl -s -o /dev/null -w "%{http_code}" -m 5 http://localhost:8123 2>/dev/null || echo 000)
-            if [ "$hc" = "200" ] || [ "$hc" = "401" ]; then
-                msg_ok "HA Web: OK (${hc})"
-            elif [ "$hc" = "000" ]; then
-                msg_dim "HA Web: загружается (это нормально первые 10-15 минут)"
-            else
-                msg_warn "HA Web: ${hc}"
-            fi
-        fi
-    fi
-
-    # --- 8. AppArmor ---
-    msg_action "[8/8] AppArmor..."
-    local aa
-    aa=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null) || aa="N"
-    if [ "$aa" = "Y" ]; then
-        msg_ok "AppArmor: активен"
-        if ! systemctl is-active --quiet apparmor 2>/dev/null; then
-            systemctl start apparmor 2>/dev/null || true
-            msg_dim "Сервис apparmor запущен"
-            fixes=$((fixes+1))
-        fi
-    else
-        msg_warn "AppArmor: не активен в ядре"
-        msg_dim "Для активации: добавьте 'apparmor=1 security=apparmor' в загрузчик и перезагрузите"
-    fi
+    # Запускаем функции спасения и анализируем код возврата
+    # 0 = OK, 2 = Fixed, 1 = Error
+    
+    apply_rescue_filesystem;   local rc=$?; [ $rc -eq 2 ] && fixes=$((fixes+1)); [ $rc -eq 1 ] && errors=$((errors+1))
+    apply_rescue_disk_space;   local rc=$?; [ $rc -eq 2 ] && fixes=$((fixes+1)); [ $rc -eq 1 ] && errors=$((errors+1))
+    apply_rescue_network;      local rc=$?; [ $rc -eq 2 ] && fixes=$((fixes+1)); [ $rc -eq 1 ] && errors=$((errors+1))
+    apply_rescue_dns;          local rc=$?; [ $rc -eq 2 ] && fixes=$((fixes+1)); [ $rc -eq 1 ] && errors=$((errors+1))
+    apply_rescue_docker;       local rc=$?; [ $rc -eq 2 ] && fixes=$((fixes+1)); [ $rc -eq 1 ] && errors=$((errors+1))
+    apply_rescue_supervisor;   local rc=$?; [ $rc -eq 2 ] && fixes=$((fixes+1)); [ $rc -eq 1 ] && errors=$((errors+1))
+    apply_rescue_ha_core;      local rc=$?; [ $rc -eq 2 ] && fixes=$((fixes+1)); [ $rc -eq 1 ] && errors=$((errors+1))
+    apply_rescue_apparmor;     local rc=$?; [ $rc -eq 2 ] && fixes=$((fixes+1)); [ $rc -eq 1 ] && errors=$((errors+1))
 
     # === ИТОГ ===
     separator
