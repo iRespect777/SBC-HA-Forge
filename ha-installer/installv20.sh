@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
 # Home Assistant Supervised - ULTIMATE INSTALLER
-# Version: 20.9.5
+# Version: 20.9.6
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/HAS-tvbox
@@ -11,7 +11,7 @@ if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
 fi
 
-readonly SCRIPT_VERSION="20.9.5"
+readonly SCRIPT_VERSION="20.9.6"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly INSTALLER_REPO="mediahome/ha-installer"
 readonly HA_INSTALLER_DIR="/var/lib/ha-installer"
@@ -2368,18 +2368,26 @@ show_modules_menu() {
       mod=$(whiptail --title "Модули и Фичи" --menu \
         "Выберите модуль для установки.\nЯдро Home Assistant затронуто НЕ БУДЕТ.\n\nESC - вернуться в главное меню" \
         28 60 17 \
+        "== СИСТЕМА ==" "" \
         "zram"          "ZRAM Swap (сжатие в RAM)" \
         "emmc"          "Оптимизация eMMC (noatime)" \
         "usbpower"      "USB питание (откл. спящего режима)" \
+        "== НАДЕЖНОСТЬ ==" "" \
         "bootrecovery"  "Восст. загрузки (проверка Docker)" \
         "watchdog"      "Watchdog (перезапуск + алерты)" \
+        "== ОПОВЕЩЕНИЯ ==" "" \
         "notifications" "Настройка Telegram / Webhook" \
+        "== БЭКАПЫ ==" "" \
         "backups"       "Бэкапы (локальные + снапшоты)" \
+        "remotebackup"  "Удаленный бэкап (rclone / SSH)" \
+        "== ИНТЕГРАЦИИ ==" "" \
         "hacs"          "HACS (магазин компонентов)" \
         "mdns"          "mDNS (доступ по .local)" \
+        "== СЕТЬ И ДОСТУП ==" "" \
         "tailscale"     "Tailscale VPN (удал. доступ)" \
         "cloudflare"    "Cloudflare Tunnel (HTTPS)" \
         "security"      "Безопасность (UFW + SSH)" \
+        "== МОНИТОРИНГ ==" "" \
         "monitoring"    "Мониторинг (Prometheus метрики)" \
         3>&1 1>&2 2>&3) || return 1
     else
@@ -2391,6 +2399,7 @@ show_modules_menu() {
         "watchdog"      "Watchdog" \
         "notifications" "Уведомления (TG/Webhook)" \
         "backups"       "Бэкапы" \
+        "remotebackup"  "Удал. бэкап (rclone/SSH)" \
         "hacs"          "HACS" \
         "mdns"          "mDNS (Avahi)" \
         "tailscale"     "Tailscale VPN" \
@@ -2417,6 +2426,7 @@ show_modules_menu() {
       watchdog)      module_watchdog ;;
       notifications) module_notifications ;;
       backups)       module_backups ;;
+      remotebackup)  module_remote_backup ;;
       hacs)          module_hacs ;;
       mdns)          module_mdns ;;
       tailscale)     module_tailscale ;;
@@ -2499,6 +2509,54 @@ module_backups() {
   OPT_BACKUP=true
   configure_cron
   msg_ok "Модуль Бэкапов активирован"
+}
+
+module_remote_backup() {
+  header "МОДУЛЬ: УДАЛЕННЫЙ БЭКАП"
+  local HAS_WHIPTAIL=false; command -v whiptail &>/dev/null && HAS_WHIPTAIL=true
+
+  # Убедимся, что базовый скрипт бэкапов существует
+  if [ ! -x /usr/local/bin/ha-backup ]; then
+    msg_warn "Сначала нужно настроить локальные бэкапы. Устанавливаем..."
+    module_backups
+  fi
+
+  local target=""
+  if [ "$HAS_WHIPTAIL" = true ]; then
+    target=$(_whip_input "Удалённый бэкап" "SSH: ssh://user@host:/path\nОблако (rclone): rclone://yandex:HA_Backups\n\nВНИМАНИЕ: Для облака потребуется ручная настройка rclone после установки!" "") || return 0
+  else
+    target=$(text_input "Удал. бэкап (ssh://... или rclone://yandex:path)" "")
+  fi
+
+  if [ -z "$target" ]; then
+    msg_warn "Цель не указана. Настройка отменена."
+    return 0
+  fi
+
+  # Устанавливаем глобальные переменные и перегенерируем скрипты
+  REMOTE_BACKUP_TARGET="$target"
+  OPT_REMOTE_BACKUP=true
+  
+  # Пересоздаем скрипты бэкапов (функция сама установит rclone, если нужно)
+  setup_script_backups
+
+  # Обновляем конфиг и cron, чтобы добавилась задача отправки в облако
+  save_config
+  configure_cron
+
+  msg_ok "Удаленный бэкап настроен на: ${target}"
+
+  # Даем подсказку по rclone, если выбрано облако
+  if [[ "$target" == rclone://* ]]; then
+    local rclone_remote="${target#rclone://}"
+    rclone_remote="${rclone_remote%%:*}"
+    if command -v rclone &>/dev/null && ! rclone listremotes 2>/dev/null | grep -q "^${rclone_remote}:"; then
+      echo ""
+      msg_warn "Профиль rclone '${rclone_remote}' еще не настроен!"
+      msg_info "Выполните команду для настройки: sudo rclone config"
+      echo ""
+    fi
+  fi
 }
 
 module_hacs() {
