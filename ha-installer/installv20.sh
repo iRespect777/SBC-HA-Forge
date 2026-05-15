@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
 # Home Assistant Supervised - ULTIMATE INSTALLER
-# Version: 20.9.6
+# Version: 20.9.7
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/HAS-tvbox
@@ -11,7 +11,7 @@ if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
 fi
 
-readonly SCRIPT_VERSION="20.9.6"
+readonly SCRIPT_VERSION="20.9.7"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly INSTALLER_REPO="mediahome/ha-installer"
 readonly HA_INSTALLER_DIR="/var/lib/ha-installer"
@@ -2225,7 +2225,7 @@ prompt_wizard_backup() {
 # FORMAT: Форматирование данных для вывода
 # ============================================================================
 
-# format_: Формирование строки подтверждения установки
+# Формирование строки подтверждения установки
 format_wizard_summary() {
   local s="Установка Home Assistant Supervised\n\n"
   
@@ -2239,7 +2239,7 @@ format_wizard_summary() {
   [ -n "$OPT_LOCALE" ] && sys+=", Локаль: ${OPT_LOCALE}"
   sys+=", Swap: ${swap_desc}"
   [ "$OPT_AUTO_REBOOT" = true ] && sys+=", Авто-перезагрузка"
-  s+="  ${BOLD}Система:${NC}      ${sys}\n"
+  s+="  \ZbСистема:\Zn      ${sys}\n"
 
   # --- Доступ и Сеть ---
   local net=""
@@ -2247,55 +2247,55 @@ format_wizard_summary() {
   if [ "$OPT_CLOUDFLARED" = true ]; then net+="Cloudflare"; [ -n "$CF_TUNNEL_TOKEN" ] && net+=" (токен задан)" || net+=" (ручная настройка)"; net+=", "; fi
   [ -n "$OPT_WIFI_SSID" ] && net+="WiFi: ${OPT_WIFI_SSID}, "
   [ "$OPT_STATIC_IP" = true ] && net+="IP: ${STATIC_IP}/${STATIC_GW}, DNS: ${STATIC_DNS}, "
-  if [ -n "$net" ]; then net="${net%, }"; s+="  ${BOLD}Доступ:${NC}       ${net}\n"; fi
+  if [ -n "$net" ]; then net="${net%, }"; s+="  \ZbДоступ:\Zn       ${net}\n"; fi
 
   # --- Безопасность ---
   local sec=""
   [ "$OPT_UFW" = true ] && sec+="UFW, "
   [ "$OPT_SSH_HARDENING" = true ] && sec+="Защита SSH, "
   [ "$OPT_AUTOUPDATE" = true ] && sec+="Автообновления ОС, "
-  if [ -n "$sec" ]; then sec="${sec%, }"; s+="  ${BOLD}Безопасность:${NC} ${sec}\n"; fi
+  if [ -n "$sec" ]; then sec="${sec%, }"; s+="  \ZbБезопасность:\Zn ${sec}\n"; fi
 
   # --- Надежность ---
   local rel=""
   [ "$OPT_WATCHDOG" = true ] && rel+="Watchdog, "
   [ "$OPT_THERMAL" = true ] && rel+="Термомонитор, "
   [ "$OPT_BOOT_RECOVERY" = true ] && rel+="Восст. загрузки, "
-  if [ -n "$rel" ]; then rel="${rel%, }"; s+="  ${BOLD}Надежность:${NC}   ${rel}\n"; fi
+  if [ -n "$rel" ]; then rel="${rel%, }"; s+="  \ZbНадежность:\Zn   ${rel}\n"; fi
 
   # --- Оптимизация ---
   local opt=""
   [ "$OPT_EMMC_TUNING" = true ] && opt+="eMMC (noatime), "
   [ "$OPT_USB_POWER" = true ] && opt+="USB питание, "
   [ "$OPT_USB_DETECT" = true ] && opt+="Детект USB, "
-  if [ -n "$opt" ]; then opt="${opt%, }"; s+="  ${BOLD}Оптимизация:${NC}  ${opt}\n"; fi
+  if [ -n "$opt" ]; then opt="${opt%, }"; s+="  \ZbОптимизация:\Zn  ${opt}\n"; fi
 
   # --- Бэкапы ---
   local bak=""
   [ "$OPT_BACKUP" = true ] && bak+="Локальные, "
   if [ "$OPT_REMOTE_BACKUP" = true ] && [ -n "$REMOTE_BACKUP_TARGET" ]; then bak+="Удаленные (${REMOTE_BACKUP_TARGET}), "; fi
   [ -n "$OPT_RESTORE_BACKUP" ] && bak+="Восст. из $(basename "$OPT_RESTORE_BACKUP"), "
-  if [ -n "$bak" ]; then bak="${bak%, }"; s+="  ${BOLD}Бэкапы:${NC}       ${bak}\n"; fi
+  if [ -n "$bak" ]; then bak="${bak%, }"; s+="  \ZbБэкапы:\Zn       ${bak}\n"; fi
 
   # --- Компоненты HA ---
   local ha_comp=""
   [ "$OPT_HACS" = true ] && ha_comp+="HACS, "
   [ "$OPT_HOSTNAME" = true ] && ha_comp+="Hostname, "
   [ "$OPT_MONITORING" = true ] && ha_comp+="Prometheus, "
-  if [ -n "$ha_comp" ]; then ha_comp="${ha_comp%, }"; s+="  ${BOLD}Компоненты:${NC}   ${ha_comp}\n"; fi
+  if [ -n "$ha_comp" ]; then ha_comp="${ha_comp%, }"; s+="  \ZbКомпоненты:\Zn   ${ha_comp}\n"; fi
 
   # --- Уведомления ---
   local notif=""
   [ "$OPT_TELEGRAM" = true ] && notif+="Telegram, "
   [ -n "$OPT_WEBHOOK_URL" ] && notif+="Webhook (${OPT_WEBHOOK_URL}), "
-  if [ -n "$notif" ]; then notif="${notif%, }"; s+="  ${BOLD}Уведомления:${NC}  ${notif}\n"; fi
+  if [ -n "$notif" ]; then notif="${notif%, }"; s+="  \ZbУведомления:\Zn  ${notif}\n"; fi
 
   # --- Расположение ---
   local loc=""
   [ -n "$OPT_DATA_DIR" ] && loc+="Данные: ${OPT_DATA_DIR}, "
   [ -n "$BOOT_DEV_FSTAB" ] && loc+="Загрузчик: ${BOOT_DEV_FSTAB}, "
   [ -n "$OPT_DOCKER_MIRROR" ] && loc+="Зеркало Docker: ${OPT_DOCKER_MIRROR}, "
-  if [ -n "$loc" ]; then loc="${loc%, }"; s+="  ${BOLD}Расположение:${NC} ${loc}\n"; fi
+  if [ -n "$loc" ]; then loc="${loc%, }"; s+="  \ZbРасположение:\Zn ${loc}\n"; fi
 
   s+="\nНачать установку? (Нет = вернуться в меню)"
   echo "$s"
@@ -2349,10 +2349,13 @@ run_wizard() {
   local summary; summary=$(format_wizard_summary)
 
   if [ "$HAS_WHIPTAIL" = true ]; then
-    whiptail --title "Подтверждение" --yesno "$summary" 25 78 && return 0
+    whiptail --title "Подтверждение" --colors --yesno "$summary" 25 78 && return 0
     _wizard_cancelled && return 1 || exit 0
   else
-    echo -e "\n$summary" >&2
+    # Очищаем теги whiptail (\Zb, \Zn и т.д.) для текстового вывода
+    local clean_summary
+    clean_summary=$(printf '%s' "$summary" | sed 's/\\Z.//g')
+    echo -e "\n$clean_summary" >&2
     text_yesno "Начать?" "y" && return 0
     _wizard_cancelled && return 1 || exit 0
   fi
