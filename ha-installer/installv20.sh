@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
 # Home Assistant Supervised - ULTIMATE INSTALLER
-# Version: 20.9.9
+# Version: 20.9.99
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/HAS-tvbox
@@ -11,7 +11,7 @@ if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
 fi
 
-readonly SCRIPT_VERSION="20.9.9"
+readonly SCRIPT_VERSION="20.9.99"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly INSTALLER_REPO="mediahome/ha-installer"
 readonly HA_INSTALLER_DIR="/var/lib/ha-installer"
@@ -5542,6 +5542,25 @@ do_uninstall() {
         separator
         msg_ok "ПОЛНОЕ УДАЛЕНИЕ ЗАВЕРШЕНО"
         msg_info "Система очищена для переустановки."
+        
+        # Показать оставшиеся зависимости, которые установил скрипт
+        msg_info "Установленные зависимости (можно удалить вручную):"
+        local dep_pkgs="avahi-daemon bluez fail2ban ufw"
+        dep_pkgs+=" unattended-upgrades"
+        dep_pkgs+=" zram-tools systemd-zram-generator"
+        dep_pkgs+=" linux-cpupower cpufrequtils"
+        local installed_deps=""
+        for p in $dep_pkgs; do
+            is_pkg_installed "$p" && installed_deps="${installed_deps} ${p}"
+        done
+        if [ -n "$installed_deps" ]; then
+            msg_dim "  sudo apt purge${installed_deps}"
+            msg_dim "  sudo apt autoremove"
+        else
+            msg_dim "  Нет установленных зависимостей"
+        fi
+        echo ""
+        
         msg_warn "Рекомендуется перезагрузка: sudo reboot"
     fi
 }
