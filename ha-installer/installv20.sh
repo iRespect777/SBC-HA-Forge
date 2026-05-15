@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
 # Home Assistant Supervised - ULTIMATE INSTALLER
-# Version: 20.9.8
+# Version: 20.9.9
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/HAS-tvbox
@@ -11,7 +11,7 @@ if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
 fi
 
-readonly SCRIPT_VERSION="20.9.8"
+readonly SCRIPT_VERSION="20.9.9"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly INSTALLER_REPO="mediahome/ha-installer"
 readonly HA_INSTALLER_DIR="/var/lib/ha-installer"
@@ -1305,10 +1305,25 @@ EOF
 # Создание drop-in для systemd (создает файл, патчит конфигурацию)
 setup_os_release_dropin() {
   mkdir -p /etc/systemd/system/hassio-supervisor.service.d
+  
+  # Вычисляем точный путь к оригинальному файлу прямо сейчас, 
+  # чтобы избежать проблем с экранированием $(cat ...) внутри systemd юнита.
+  local symlink_target="/usr/lib/os-release" # Стандартный путь для Debian/Armbian
+  if [ -f "${BACKUP_DIR}/os-release.symlink" ]; then
+    local lt
+    lt=$(cat "${BACKUP_DIR}/os-release.symlink")
+    if [[ "$lt" == /* ]]; then
+      symlink_target="$lt" # Абсолютный путь
+    else
+      # Если путь относительный (например, ../usr/lib/os-release), резолвим его
+      symlink_target="$(cd /etc && realpath "$lt" 2>/dev/null || echo /usr/lib/os-release)"
+    fi
+  fi
+
   cat > /etc/systemd/system/hassio-supervisor.service.d/fix-os-release.conf << DROPIN
 [Service]
 ExecStartPre=/bin/bash -c 'rm -f /etc/os-release; F="${BACKUP_DIR}/os-release.faked"; [ -f "\$F" ] && cp "\$F" /etc/os-release'
-ExecStopPost=/bin/bash -c 'rm -f /etc/os-release; S="${BACKUP_DIR}/os-release.symlink"; O="${BACKUP_DIR}/os-release.original"; if [ -f "\$S" ]; then ln -sf "$(cat "\$S")" /etc/os-release; elif [ -f "\$O" ]; then cp "\$O" /etc/os-release; fi'
+ExecStopPost=/bin/bash -c 'rm -f /etc/os-release; O="${BACKUP_DIR}/os-release.original"; S="${BACKUP_DIR}/os-release.symlink"; if [ -f "\$S" ]; then ln -sf "${symlink_target}" /etc/os-release; elif [ -f "\$O" ]; then cp "\$O" /etc/os-release; fi'
 DROPIN
   schedule_daemon_reload
   flush_daemon_reload
