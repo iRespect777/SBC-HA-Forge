@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
 # Home Assistant Supervised - ULTIMATE INSTALLER
-# Version: 20.9.2
+# Version: 20.9.3
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/HAS-tvbox
@@ -11,7 +11,7 @@ if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
 fi
 
-readonly SCRIPT_VERSION="20.9.2"
+readonly SCRIPT_VERSION="20.9.3"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly INSTALLER_REPO="mediahome/ha-installer"
 readonly HA_INSTALLER_DIR="/var/lib/ha-installer"
@@ -2370,22 +2370,22 @@ show_modules_menu() {
         24 60 15 \
         "== СИСТЕМА ==" "" \
         "zram"          "ZRAM Swap (сжатие в RAM)" \
-        "emmc"          "Оптимизация eMMC (noatime, логи)" \
-        "usbpower"      "USB питание (отключение спящего режима)" \
+        "emmc"          "Оптимизация eMMC (noatime)" \
+        "usbpower"      "USB питание (откл. спящего режима)" \
         "== НАДЕЖНОСТЬ ==" "" \
-        "bootrecovery"  "Восстановление загрузки" \
-        "watchdog"      "Watchdog (авто-перезапуск HA + алерты)" \
-        "== РЕЗЕРВНОЕ КОПИРОВАНИЕ ==" "" \
-        "backups"       "Бэкапы (локальные + CLI снапшоты)" \
+        "bootrecovery"  "Восст. загрузки (проверка Docker)" \
+        "watchdog"      "Watchdog (перезапуск + алерты)" \
+        "== БЭКАПЫ ==" "" \
+        "backups"       "Бэкапы (локальные + снапшоты)" \
         "== ИНТЕГРАЦИИ ==" "" \
-        "hacs"          "HACS (магазин кастом компонентов)" \
-        "mdns"          "mDNS (доступ по homeassistant.local)" \
-        "== СЕТЬ И БЕЗОПАСНОСТЬ ==" "" \
+        "hacs"          "HACS (магазин компонентов)" \
+        "mdns"          "mDNS (доступ по .local)" \
+        "== СЕТЬ И ДОСТУП ==" "" \
         "tailscale"     "Tailscale VPN (удал. доступ)" \
-        "cloudflare"    "Cloudflare Tunnel (публичный HTTPS)" \
-        "security"      "UFW (безопасные правила) + SSH" \
+        "cloudflare"    "Cloudflare Tunnel (HTTPS)" \
+        "security"      "Безопасность (UFW + SSH)" \
         "== МОНИТОРИНГ ==" "" \
-        "monitoring"    "Prometheus Node Exporter метрики" \
+        "monitoring"    "Мониторинг (Prometheus метрики)" \
         "back"          "Назад в главное меню" \
         3>&1 1>&2 2>&3) || return 1
     else
