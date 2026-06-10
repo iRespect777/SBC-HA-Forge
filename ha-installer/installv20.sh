@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
 # Home Assistant Supervised - ULTIMATE INSTALLER
-# Version: 20.9.994
+# Version: 20.9.995
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/HAS-tvbox
@@ -11,7 +11,7 @@ if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
 fi
 
-readonly SCRIPT_VERSION="20.9.994"
+readonly SCRIPT_VERSION="20.9.995"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly INSTALLER_REPO="mediahome/ha-installer"
 readonly HA_INSTALLER_DIR="/var/lib/ha-installer"
@@ -856,7 +856,7 @@ setup_reboot_continue() {
         exec_args="${exec_args} --skip-update"
     [ "$OPT_AUTO_REBOOT" = true ] && \
         exec_args="${exec_args} --auto-reboot"
-    [ -n "$PROFILE" ] && \
+    [ -n "$PROFILE" ] && [ "$PROFILE" != "custom" ] && \
         exec_args="${exec_args} --profile ${PROFILE}"
     [ -n "$HA_MACHINE" ] && \
         exec_args="${exec_args} --machine ${HA_MACHINE}"
@@ -1734,6 +1734,14 @@ INFOEOF
 # ============================================================================
 apply_profile() {
   local p="$1"
+  # "custom" означает, что пользователь выбрал компоненты вручную в визарде.
+  # Применять пресет не нужно, просто фиксируем статус.
+  if [ "$p" = "custom" ]; then
+    PROFILE="custom"
+    RUN_WIZARD=false
+    msg_ok "Профиль: custom (ручной выбор)"
+    return 0
+  fi
   [ -z "${PROFILES[$p]+x}" ] && { msg_error "Профиль '$p' не найден. Доступные: ${!PROFILES[*]}"; exit 1; }
   eval "${PROFILES[$p]}"
   PROFILE="$p"
@@ -3535,8 +3543,7 @@ detect_boot_dir() {
 # ============================================================================
 # SETUP: Настройка конфигурации загрузчика
 # ============================================================================
-
-# setup_: Патчинг файлов загрузчика для включения AppArmor и настройка fstab
+# Патчинг файлов загрузчика для включения AppArmor и настройка fstab
 setup_bootloader_apparmor() {
   msg_info "Каталог загрузчика: ${BOOT_DIR}"
   
@@ -3547,6 +3554,7 @@ setup_bootloader_apparmor() {
   [ -f "${BOOT_DIR}/armbianEnv.txt" ] && boot_files+=("${BOOT_DIR}/armbianEnv.txt")
   [ -f "${BOOT_DIR}/uEnv.txt" ] && boot_files+=("${BOOT_DIR}/uEnv.txt")
   [ -f "${BOOT_DIR}/extlinux/extlinux.conf" ] && boot_files+=("${BOOT_DIR}/extlinux/extlinux.conf")
+  [ -f "${BOOT_DIR}/cmdline.txt" ] && boot_files+=("${BOOT_DIR}/cmdline.txt") # Добавлена поддержка RPi
 
   # Если файлы не найдены, пытаемся искать в /boot как фоллбэк
   if [ ${#boot_files[@]} -eq 0 ] && [ "$BOOT_DIR" != "/boot" ]; then
@@ -3555,6 +3563,7 @@ setup_bootloader_apparmor() {
     [ -f "${BOOT_DIR}/armbianEnv.txt" ] && boot_files+=("${BOOT_DIR}/armbianEnv.txt")
     [ -f "${BOOT_DIR}/uEnv.txt" ] && boot_files+=("${BOOT_DIR}/uEnv.txt")
     [ -f "${BOOT_DIR}/extlinux/extlinux.conf" ] && boot_files+=("${BOOT_DIR}/extlinux/extlinux.conf")
+    [ -f "${BOOT_DIR}/cmdline.txt" ] && boot_files+=("${BOOT_DIR}/cmdline.txt")
   fi
 
   if [ ${#boot_files[@]} -eq 0 ]; then
@@ -3565,17 +3574,68 @@ setup_bootloader_apparmor() {
   # Патчим найденные файлы
   for f in "${boot_files[@]}"; do
     cp "$f" "${BACKUP_DIR}/$(basename "$f").bak" 2>/dev/null
-    grep -q "apparmor=1" "$f" && { patched=true; continue; }
-
-    if [[ "$f" == *extlinux.conf ]]; then
-      sed -i '/^[[:space:]]*append/ s/$/ apparmor=1 security=apparmor/' "$f"
-    else
-      grep -q "^extraargs=" "$f" && \
-        sed -i 's|^extraargs=.*|& apparmor=1 security=apparmor|' "$f" || \
-        echo "extraargs=apparmor=1 security=apparmor" >> "$f"
+    
+    # Уже пропатчено?
+    if grep -q "apparmor=1" "$f" 2>/dev/null; then
+      msg_ok "$(basename "$f") уже содержит apparmor=1"
+      patched=true
+      continue
     fi
-    msg_ok "$(basename "$f") пропатчен"
-    patched=true
+
+    msg_action "Патчинг $(basename "$f")..."
+
+    # Разная логика для разных форматов файлов
+    case "$(basename "$f")" in
+      extlinux.conf)
+        # extlinux: дописать в конец строки APPEND
+        sed -i '/^[[:space:]]*[Aa][Pp][Pp][Ee][Nn][Dd]/ s/$/ apparmor=1 security=apparmor/' "$f"
+        if grep -q "apparmor=1" "$f"; then
+          msg_ok "$(basename "$f") пропатчен (строка APPEND)"; patched=true
+        else
+          msg_warn "$(basename "$f"): строка APPEND не найдена для патчинга"
+        fi
+        ;;
+        
+      cmdline.txt)
+        # Raspberry Pi: весь файл - это одна строка. Дописать в конец.
+        sed -i 's/$/ apparmor=1 security=apparmor/' "$f"
+        if grep -q "apparmor=1" "$f"; then
+          msg_ok "$(basename "$f") пропатчен (одна строка)"; patched=true
+        else
+          msg_error "Не удалось пропатчить $(basename "$f")"
+        fi
+        ;;
+        
+      armbianEnv.txt|uEnv.txt)
+        # Armbian/uEnv: формат ключ=значение. Ищем переменные, которые гарантированно попадают в bootargs.
+        if grep -q "^extraargs=" "$f" 2>/dev/null; then
+          # Стандартный Armbian
+          sed -i '/^extraargs=/ s/$/ apparmor=1 security=apparmor/' "$f"
+          msg_ok "$(basename "$f") пропатчен (добавлено в extraargs)"
+        elif grep -q "^optargs=" "$f" 2>/dev/null; then
+          # Альтернативный стандарт
+          sed -i '/^optargs=/ s/$/ apparmor=1 security=apparmor/' "$f"
+          msg_ok "$(basename "$f") пропатчен (добавлено в optargs)"
+        elif grep -q "^APPEND=" "$f" 2>/dev/null; then
+          # Кастомные прошивки TV-боксов: всё вписано в одну строку APPEND=
+          sed -i '/^APPEND=/ s/$/ apparmor=1 security=apparmor/' "$f"
+          msg_ok "$(basename "$f") пропатчен (добавлено в APPEND)"
+        elif grep -q "^rootflags=" "$f" 2>/dev/null; then
+          # Фоллбэк для TV-боксов: U-Boot игнорирует extraargs, но использует rootflags.
+          sed -i '/^rootflags=/ s/$/ apparmor=1 security=apparmor/' "$f"
+          msg_ok "$(basename "$f") пропатчен (добавлено в rootflags)"
+        else
+          # Нет ни одной подходящей переменной. Создаем extraargs=, но предупрежаем.
+          echo "extraargs=apparmor=1 security=apparmor" >> "$f"
+          msg_warn "$(basename "$f") пропатчен (создана extraargs). Если AppArmor не заработает, U-Boot игнорирует эту переменную."
+        fi
+        patched=true
+        ;;
+        
+      *)
+        msg_warn "Неизвестный формат загрузчика: $(basename "$f")"
+        ;;
+    esac
   done
 
   # Если загрузчик был примонтирован временно, добавляем партицию в fstab
