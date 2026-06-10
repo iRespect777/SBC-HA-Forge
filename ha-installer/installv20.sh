@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
 # Home Assistant Supervised - ULTIMATE INSTALLER
-# Version: 20.9.995
+# Version: 20.9.996
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/HAS-tvbox
@@ -11,7 +11,7 @@ if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
 fi
 
-readonly SCRIPT_VERSION="20.9.995"
+readonly SCRIPT_VERSION="20.9.996"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly INSTALLER_REPO="mediahome/ha-installer"
 readonly HA_INSTALLER_DIR="/var/lib/ha-installer"
@@ -889,6 +889,11 @@ SVCEOF
 }
 
 remove_reboot_continue() {
+  if [ -n "$FROM_STEP" ]; then
+    systemctl disable "${REBOOT_CONTINUE_SVC}" 2>/dev/null || true
+    return 0
+  fi
+
   systemctl disable "${REBOOT_CONTINUE_SVC}" 2>/dev/null || true
   rm -f "/etc/systemd/system/${REBOOT_CONTINUE_SVC}.service" 2>/dev/null || true
   systemctl daemon-reload 2>/dev/null || true
