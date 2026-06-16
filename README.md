@@ -2,6 +2,6 @@
 ## 🚀 Тест новой модульной версии.
 
 ```bash
-wget -qO has-tvbox.sh https://raw.githubusercontent.com/iRespect777/HAS-tvbox/refs/heads/refactoring/ha-installer/installv20.sh
-sudo bash has-tvbox.sh
+wget -qO SBC-HA-Forge.sh https://raw.githubusercontent.com/iRespect777/SBC-HA-Forge/refs/heads/refactoring/ha-installer/installv20.sh
+sudo bash SBC-HA-Forge.sh
 ```
