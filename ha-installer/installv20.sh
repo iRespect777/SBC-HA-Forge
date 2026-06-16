@@ -5960,12 +5960,13 @@ show_banner() {
         [ "$LOGGING_ACTIVE" != true ] && clear
     fi
     [ "$SILENT" != true ] && {
-        echo -e "${BLUE} _ _ _ _ _ _ ${NC}"
-        echo -e "${BLUE} | | | | ___ _ __ ___ ___ / \\ ___ ___(_)___| |_ __ _ _ __ | |_ ${NC}"
-        echo -e "${BLUE} | |_| |/ _ \\| '_ \` _ \\ / _ \\ / _ \\ / __/ __| / __| __/ _\` | '_ \\| __|${NC}"
-        echo -e "${BLUE} | _ | (_) | | | | | | __// ___ \\\\__ \\__ \\ \\__ \\ || (_| | | | | |_ ${NC}"
-        echo -e "${BLUE} |_| |_|\\___/|_| |_| |_|\\___/_/ \\_\\___/___/_|___/\\__\\__,_|_| |_|\\__|${NC}"
-        echo -e "${WHITE}${BOLD} ULTIMATE INSTALLER v${SCRIPT_VERSION}${NC}"
+        echo -e "${BLUE}================================================================${NC}"
+        echo -e ""
+        echo -e "          ${CYAN}${BOLD}S B C - H A - F O R G E${NC}"
+        echo -e "          ${WHITE}Ultimate Home Assistant Supervised Installer${NC}"
+        echo -e "          ${DIM}Version: ${SCRIPT_VERSION}${NC}"
+        echo -e ""
+        echo -e "${BLUE}================================================================${NC}"
 
         # Статус HA если установлен
         if systemctl is-active --quiet hassio-supervisor 2>/dev/null; then
@@ -5979,8 +5980,7 @@ show_banner() {
                 echo -e " ${YELLOW}● HA установлен (загружается...)${NC}"
             fi
         fi
-
-        separator
+        echo ""
     }
 }
 
