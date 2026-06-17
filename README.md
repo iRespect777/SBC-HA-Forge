@@ -2,6 +2,6 @@
 ## 🚀 Тест новой модульной версии.
 
 ```bash
-wget -qO SBC-HA-Forge.sh https://raw.githubusercontent.com/iRespect777/SBC-HA-Forge/refs/heads/refactoring/ha-installer/installv20.sh
-sudo bash SBC-HA-Forge.sh
+wget https://raw.githubusercontent.com/iRespect777/SBC-HA-Forge/refs/heads/main/ha-installer/sbc_ha_forge.sh
+sudo bash sbc_ha_forge.sh
 ```
