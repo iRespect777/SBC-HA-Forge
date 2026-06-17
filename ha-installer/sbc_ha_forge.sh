@@ -5960,13 +5960,15 @@ show_banner() {
         [ "$LOGGING_ACTIVE" != true ] && clear
     fi
     [ "$SILENT" != true ] && {
-        echo -e "${BLUE}================================================================${NC}"
-        echo -e ""
-        echo -e "          ${CYAN}${BOLD}S B C - H A - F O R G E${NC}"
-        echo -e "          ${WHITE}Ultimate Home Assistant Supervised Installer${NC}"
-        echo -e "          ${DIM}Version: ${SCRIPT_VERSION}${NC}"
-        echo -e ""
-        echo -e "${BLUE}================================================================${NC}"
+        echo -e "${CYAN}"
+	      echo "  ____  ____   ____   _   _    _      _____ ___  ____   ____ _____  "
+	      echo " / ___|| __ ) / ___| | | | |  / \    |  ___/ _ \|  _ \ / ___| ____| "
+	      echo " \___ \|  _ \| |     | |_| | / _ \   | |_ | | | | |_) | |  _|  _|   "
+	      echo "  ___) | |_) | |___  |  _  |/ ___ \  |  _|| |_| |  _ <| |_| | |___  "
+	      echo " |____/|____/ \____| |_| |_/_/   \_\ |_|   \___/|_| \_\\____|_____| "
+        echo -e "${NC}"
+        echo -e "${BLUE}  [ SBC-HA-FORGE ]${NC} ${WHITE}${BOLD}Установщик v${SCRIPT_VERSION}${NC}"
+
 
         # Статус HA если установлен
         if systemctl is-active --quiet hassio-supervisor 2>/dev/null; then
