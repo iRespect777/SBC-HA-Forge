@@ -4,9 +4,7 @@
 <a href="#русский"><img src="https://img.shields.io/badge/🇷🇺_Русский-activeblue" alt="Русский"></a>
 <a href="#english"><img src="https://img.shields.io/badge/🇬🇧_English-inactive-lightgrey" alt="English"></a>
 
-<br><br>
-<!-- TODO: Замените ссылку на логотип, если у вас есть свой. Можно удалить эту строку -->
-<img src="https://raw.githubusercontent.com/home-assistant/assets/master/logo/logo-small.png" width="100" height="100">
+
 
 # Ultimate Home Assistant Supervised Installer (HAS-TVBox)
 
