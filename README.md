@@ -140,7 +140,3 @@ If you find a bug or want to suggest a feature, please open an Issue in the repo
 **Author:** [Your Name / GitHub Username]
 
 ---
-
-<!-- TODO: Добавьте информацию о лицензии, если используете отличную от MIT -->
-## 📄 License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
