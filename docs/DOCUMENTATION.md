@@ -1,275 +1,287 @@
 ---
 
-# 📖 Полная документация: Ultimate HA Supervised Installer
-
-Эта документация описывает архитектуру, возможности, режимы работы и внутренние механизмы установщика Home Assistant Supervised для неофициально поддерживаемых устройств (TV-боксов, SBC, десктопов).
+# 🇷🇺 Полная техническая документация (Русская версия)
 
 ## Оглавление
-1. [Архитектура и концепция](#архитектура-и-концепция)
-2. [Системные требования](#системные-требования)
-3. [Установка и Быстрый старт](#установка-и-быстрый-старт)
-4. [Интерактивный мастер (Wizard)](#интерактивный-мастер-wizard)
-5. [Профили установки](#профили-установки)
-6. [Параметры командной строки (CLI)](#параметры-командной-строки-cli)
-7. [Модульная система (Menu Modules)](#модульная-система-menu-modules)
-8. [Установленные утилиты и скрипты](#установленные-утилиты-и-скрипты)
-9. [Резервное копирование и восстановление](#резервное-копирование-и-восстановление)
-10. [Сетевые настройки и VPN](#сетевые-настройки-и-vpn)
-11. [Уведомления](#уведомления)
-12. [Режим восстановления (Rescue Mode)](#режим-восстановления-rescue-mode)
-13. [Удаление (Uninstall)](#удаление-uninstall)
-14. [Внутренние механизмы (Under the hood)](#внутренние-механизмы-under-the-hood)
+1. [Архитектура и система состояния (State Machine)](#1-архитектура-и-система-состояния)
+2. [Требования и подготовка среды](#2-требования-и-подготовка-среды)
+3. [Матрица профилей установки](#3-матрица-профилей-установки)
+4. [Параметры командной строки (CLI)](#4-параметры-командной-строки-cli)
+5. [Глубокий анализ: Сеть и NetworkManager](#5-глубокий-анализ-сеть-и-networkmanager)
+6. [Глубокий анализ: Подмена `os-release`](#6-глубокий-анализ-подмена-os-release)
+7. [Глубокий анализ: AppArmor и загрузчик](#7-глубокий-анализ-apparmor-и-загрузчик)
+8. [Менеджер бэкапов: Логика работы](#8-менеджер-бэкапов-логика-работы)
+9. [Модули, Утилиты и Cron](#9-модули-утилиты-и-cron)
+10. [Система уведомлений (Webhooks)](#10-система-уведомлений-webhooks)
+11. [Удаление и откаты (Rollbacks)](#11-удаление-и-откаты-rollbacks)
 
 ---
 
-## Архитектура и концепция
-Скрипт написан на чистом Bash (>= 4.0) и представляет собой модульный фреймворк. 
-Вместо линейного выполнения, он использует **систему состояния (State Machine)**. 
-Каждый шаг установки (пре-чек, сеть, Docker, HA и т.д.) записывает свой успех в файл состояния. 
-Если скрипт прервать, при следующем запуске он пропустит завершенные шаги и начнет с места сбоя. 
+### 1. Архитектура и система состояния
+Скрипт не является линейным bash-файлом. Это **идемпотентный конечный автомат** (State Machine).
 
-**Ключевые особенности:**
-- Подмена `os-release` для прохождения строгих проверок `homeassistant-supervised.deb`.
-- Патчинг загрузчика (U-Boot/GRUB/RPi) для включения AppArmor.
-- Безопасный переход на NetworkManager с автоматическим откатом при обрыве SSH.
-- Автоматическое продолжение установки после перезагрузки системы.
+- **Файл состояния:** `/var/lib/ha-installer/state`.
+- **Формат:** `[имя_шага]|[unix_timestamp]|[версия_скрипта]` (например, `docker|1715600000|20.9.996`).
+- **Логика:** Перед выполнением шага (например, `step_install_docker`) вызывается функция `is_done "docker"`. Если шаг уже отмечен как выполненный в файле состояния, скрипт его пропускает. 
+- **Обновление скрипта:** Если версия скрипта в файле состояния не совпадает с текущей версией, шаг считается устаревшим и будет выполнен заново (для применения новых настроек).
+- **Блокировки (Locks):** Используется `flock` на файле `/var/lock/ha_install.lock` (fd 200). Это предотвращает параллельный запуск двух экземпляров скрипта.
+- **Откаты (Rollbacks):** В скрипте реализован массив `ROLLBACK_ACTIONS`. Перед опасной операцией (например, установка Docker) скрипт пушит в массив команду удаления (`apt-get remove -y docker-ce`). Если на любом из следующих шагов происходит критическая ошибка (или нажат Ctrl+C), срабатывает триггер `cleanup`, который выполняет команды отката в обратном порядке.
+
+### 2. Требования и подготовка среды
+- **ОС:** Armbian (Bookworm/Trixie) или чистый Debian 11/12/13.
+- **Архитектура:** `aarch64` или `x86_64` (ARMv7 вызовет ошибку на этапе `preflight`, так как HA Supervised требует 64 бита).
+- **Тест железа (`do_benchmark`):** Скрипт проверяет скорость диска через `dd if=/dev/zero`, объем RAM и ядра CPU. При RAM < 1GB установка прервется. При RAM < 1.5GB будет рекомендован профиль `minimal` и Swap-файл.
+
+### 3. Матрица профилей установки
+В скрипте жестко зашиты 5 профилей. Ниже представлена матрица включенных компонентов (`true`/`false`) для каждого из них:
+
+| Компонента | minimal | standard | full | server | dev |
+|------------|---------|----------|------|--------|-----|
+| ZRAM Swap | ✅ | ✅ | ✅ | ✅ | ❌ |
+| eMMC Tuning | ❌ | ✅ | ✅ | ✅ | ❌ |
+| UFW (Firewall) | ❌ | ✅ | ✅ | ✅ | ❌ |
+| SSH Hardening | ❌ | ✅ | ✅ | ✅ | ❌ |
+| Watchdog | ❌ | ✅ | ✅ | ✅ | ❌ |
+| Auto-Updates | ❌ | ✅ | ✅ | ✅ | ❌ |
+| Backups | ❌ | ✅ | ✅ | ✅ | ❌ |
+| HACS | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Monitoring | ❌ | ❌ | ✅ | ✅ | ❌ |
+| Tailscale | ❌ | ❌ | ✅ | ✅ | ❌ |
+| Cloudflare | ❌ | ❌ | ✅ | ❌ | ❌ |
+| Static IP | ❌ | ❌ | ❌ | ✅ | ❌ |
+
+### 4. Параметры командной строки (CLI)
+Для автоматизации (Headless) доступны следующие флаги:
+- `--profile <ИМЯ>`: Указание профиля.
+- `--machine <ТИП>`: Принудительная установка типа машины HA (по умолчанию авто-детекция: `generic-x86-64`, `raspberrypi4-64`, `qemuarm-64` и т.д.).
+- `--data-dir <ПУТЬ>`: Перенос `/usr/share/hassio` и `/var/lib/docker` на внешний диск. Скрипт проверит ФС (ext4/btrfs) и свободное место (>10GB).
+- `--swap <РАЗМЕР|zram|none>`: Настройка Swap. Если указано число — создаст файл через `dd` и пропишет в `/etc/fstab`.
+- `--from-step <ШАГ>`: Ручное продолжение установки с определенного шага (используется internally после ребута).
+- `--import-config <ФАЙЛ>`: Импорт ранее сохраненного конфига (профиль, токены, IP) для идентичного развертывания на других устройствах.
+- `--dry-run`: Режим симуляции. Команды `apt`, `dpkg`, `docker` не выполняются, а только выводятся на экран.
+
+### 5. Глубокий анализ: Сеть и NetworkManager
+Переключение сети на TV-боксах — самая частая причина "окирпичивания". Скрипт решает это так:
+1. **Бэкап:** Сохраняются `/etc/network/interfaces` и `/etc/resolv.conf`.
+2. **Блокировка автозапуска:** Перед `apt-get install network-manager` создается временный файл `/usr/sbin/policy-rc.d`, который запрещает dpkg автоматически запускать любые сервисы (exit 101). Это предотвращает захват сети NM до его настройки.
+3. **Настройка NM:** Создаются конфиги в `/etc/NetworkManager/conf.d/`, отключающие конфликт с `ifupdown`.
+4. **Переключение:** Сервис `networking` отключается, NM запускается. Скрипт ждет получения IP 30 секунд.
+5. **Откат (Rollback):** Если IP не получен, скрипт:
+   - Останавливает NM.
+   - Восстанавливает `interfaces.bak`.
+   - Включает `ifupdown` и делает `ifup <iface>`.
+   - Если и это не помогает, дергает `dhclient` напрямую.
+6. **Static IP:** Применяется через `nmcli con mod` к активному UUID подключения. Изменение применяется "на лету" без обрыва текущей SSH-сессии.
+
+### 6. Глубокий анализ: Подмена `os-release`
+HA Supervised требует `ID=debian` в `/etc/os-release`. Armbian имеет `ID=armbian`.
+1. Скрипт определяет целевой кодовое имя (bookworm/trixie).
+2. Сохраняет оригинальный файл в `/var/lib/ha-installer/backup/os-release.original`.
+3. Создает поддельный `os-release` с `ID=debian` и нужным `VERSION_CODENAME`.
+4. **Systemd Drop-in:** Создается файл `/etc/systemd/system/hassio-supervisor.service.d/fix-os-release.conf`.
+   - `ExecStartPre`: Перед запуском Supervisor копирует фейковый `os-release` в `/etc/`.
+   - `ExecStopPost`: После остановки Supervisor восстанавливает оригинальный `os-release`.
+   *Итог: Система думает, что она Armbian, а HA Supervisor видит чистый Debian.*
+
+### 7. Глубокий анализ: AppArmor и загрузчик
+HA требует AppArmor в ядре. На многих боксах он отключен.
+1. Читается `/sys/module/apparmor/parameters/enabled`. Если `N`, начинается патчинг.
+2. Скрипт ищет конфиги загрузчика: `armbianEnv.txt` (Armbian), `extlinux.conf` (GRUB/U-Boot), `cmdline.txt` (Raspberry Pi).
+3. В зависимости от формата, дописывает `apparmor=1 security=apparmor`:
+   - В `extlinux`: в конец строки `APPEND`.
+   - В `armbianEnv`: в переменную `extraargs=` (или `optargs=`, `APPEND=`).
+4. **Авто-продолжение:** Если выбран `--auto-reboot`, скрипт создает systemd-oneshot сервис `ha-install-continue.service`. Этот сервис запускается при старте системы, удаляет сам себя и запускает скрипт с флагом `--from-step=apparmor`.
+   Защита от зацикливания: файл `/var/lib/ha-installer/reboot_attempts` ограничивает количество автоперезагрузок тремя.
+
+### 8. Менеджер бэкапов: Логика работы
+Скрипт `/usr/local/bin/ha-backup` работает в двух режимах:
+1. **Полный снапшот (если доступен HA CLI):**
+   - Вызывает `ha backups new --name AutoBackup_...`.
+   - Парсит JSON через `jq`, оставляет последние 5 снапшотов, старые удаляет через `ha backups remove`.
+2. **Быстрый TAR-бэкап (fallback):**
+   - Определяет путь к `/config` внутри контейнера через `docker inspect`.
+   - Создает архив через `tar` (с `pigz` для многопоточного сжатия, если установлен).
+   - Исключает: `*.db`, `*.db-shm`, `tts/`, `deps/`, `__pycache__/`.
+3. **Удаленный бэкап:**
+   - Скрипт `/usr/local/bin/ha-backup-remote` берет последний созданный бэкап.
+   - Если цель `ssh://`, использует `rsync -avz --partial`.
+   - Если цель `rclone://`, проверяет наличие профиля в `rclone listremotes` и выполняет `rclone copy`.
+
+### 9. Модули, Утилиты и Cron
+Установленные в `/usr/local/bin/` скрипты автоматически интегрируются в систему. В `/etc/cron.d/ha-tools` генерируются следующие задачи:
+- `*/5 * * * *` — `ha-watchdog` (пинг 8123, рестарт контейнера при падении с экспоненциальной задержкой: 5м, 10м, 20м... до 60м).
+- `*/10 * * * *` — `ha-net-recovery` (пинг шлюза, рестарт NetworkManager).
+- `*/5 * * * *` — `ha-thermal` (проверка температуры, алерт при >80C).
+- `0 4 * * 0` — `ha-backup` (каждое воскресенье в 04:00).
+- `30 4 * * 0` — `ha-backup-remote` (в 04:30 воскресенья).
+- `* * * * *` — `ha-metrics` (каждую минуту обновляет метрики Prometheus).
+- `0 9 * * 1` — `ha-weekly-report` (отчет по понедельникам).
+- `30 3 * * *` — `ha-cleanup` (очистка Docker образов и логов systemd).
+
+### 10. Система уведомлений (Webhooks)
+Скрипт `_send_webhook` умеет адаптировать формат запроса под конкретный сервис:
+- **ntfy.sh:** Отправляет Plain Text в Body, добавляет заголовки `Title`, `Priority`, `Tags`.
+- **Discord/Slack:** Формирует JSON `{"content": "..."}` (Discord) или `{"text": "..."}` (Slack). Экранирует спецсимволы через `sed` (`s/\\/\\\\/g; s/"/\\"/g`).
+- **Gotify:** Отправляет JSON с полями `title`, `message`, `priority`.
+- **Unknown URL:** Сначала пробует Plain Text. Если сервер отвечает не `2xx`, повторяет запрос в JSON формате `{"text":"..."}`.
+- **Rate Limiting:** Уведомления не отправляются чаще, чем раз в 30 секунд (файл `/tmp/.ha_notify_rate`).
+
+### 11. Удаление и откаты (Rollbacks)
+Команда `sudo ha-install --uninstall` предлагает два пути:
+1. **Standard:** 
+   - `dpkg --purge homeassistant-supervised os-agent`
+   - Удаляет контейнеры HA (`docker rm -f`) и образы (`docker rmi -f`).
+   - Удаляет сгенерированные скрипты из `/usr/local/bin/` и правила UFW/Fail2Ban.
+   - Восстанавливает оригинальный `os-release`.
+   - Docker и NetworkManager остаются нетронутыми.
+2. **Full:**
+   - Выполняет все шаги Standard.
+   - Полностью удаляет Docker CE (`apt-get purge docker-ce`), папки `/var/lib/docker` и `/usr/share/hassio`.
+   - Восстанавливает `ifupdown` и оригинальный `/etc/network/interfaces`.
+   - Чистит параметры AppArmor из загрузчика.
+   - Возвращает оригинальное имя хоста.
+   - Выводит список установленных зависимостей (curl, jq, ufw и т.д.), чтобы пользователь мог удалить их вручную через `apt autoremove`.
+
+---
+---
+
+# 🇬🇧 Full Technical Documentation (English Version)
+
+## Table of Contents
+1. [Architecture and State Machine](#1-architecture-and-state-machine)
+2. [Requirements and Environment Preparation](#2-requirements-and-environment-preparation)
+3. [Installation Profiles Matrix](#3-installation-profiles-matrix)
+4. [Command Line Interface (CLI) Arguments](#4-command-line-interface-cli-arguments)
+5. [Deep Dive: Network and NetworkManager](#5-deep-dive-network-and-networkmanager)
+6. [Deep Dive: `os-release` Faking](#6-deep-dive-os-release-faking)
+7. [Deep Dive: AppArmor and Bootloader](#7-deep-dive-apparmor-and-bootloader)
+8. [Backup Manager: Logic and Execution](#8-backup-manager-logic-and-execution)
+9. [Modules, Utilities, and Cron](#9-modules-utilities-and-cron)
+10. [Notification System (Webhooks)](#10-notification-system-webhooks)
+11. [Uninstallation and Rollbacks](#11-uninstallation-and-rollbacks)
 
 ---
 
-## Системные требования
+### 1. Architecture and State Machine
+The script is not a linear bash file. It is an **idempotent State Machine**.
+- **State File:** `/var/lib/ha-installer/state`.
+- **Format:** `[step_name]|[unix_timestamp]|[script_version]` (e.g., `docker|1715600000|20.9.996`).
+- **Logic:** Before executing a step (e.g., `step_install_docker`), the `is_done "docker"` function is called. If the step is already marked as done in the state file, the script skips it.
+- **Script Updates:** If the script version in the state file doesn't match the current version, the step is considered outdated and will be executed again (to apply new configurations).
+- **Locks:** Uses `flock` on `/var/lock/ha_install.lock` (fd 200). This prevents two instances of the script from running simultaneously.
+- **Rollbacks:** The script implements a `ROLLBACK_ACTIONS` array. Before a dangerous operation (e.g., installing Docker), the script pushes the removal command (`apt-get remove -y docker-ce`) into the array. If a critical error occurs on any subsequent step (or Ctrl+C is pressed), the `cleanup` trap is triggered, executing rollback commands in reverse order.
 
-- **ОС:** Debian 11 (Bullseye), 12 (Bookworm), 13 (Trixie) или Armbian на их основе.
-- **Архитектура:** `aarch64` (ARM 64-bit) или `x86_64` (AMD64). *(32-битные системы не поддерживаются самим Home Assistant).*
-- **RAM:** Минимум 1 ГБ (рекомендуется 2 ГБ+).
-- **Диск:** Минимум 10 ГБ свободного места.
-- **Права:** Скрипт требует запуска от `root` (`sudo`).
-- **Сеть:** Стабильное интернет-соединение (для загрузки пакетов и образов Docker).
+### 2. Requirements and Environment Preparation
+- **OS:** Armbian (Bookworm/Trixie) or pure Debian 11/12/13.
+- **Architecture:** `aarch64` or `x86_64` (ARMv7 will fail at the `preflight` stage as HA Supervised requires 64-bit).
+- **Hardware Benchmark (`do_benchmark`):** The script checks disk speed via `dd if=/dev/zero`, RAM size, and CPU cores. If RAM < 1GB, installation aborts. If RAM < 1.5GB, the `minimal` profile and a Swap file are recommended.
 
----
+### 3. Installation Profiles Matrix
+There are 5 hardcoded profiles. Below is the matrix of enabled components (`true`/`false`) for each:
 
-## Установка и Быстрый старт
+| Component | minimal | standard | full | server | dev |
+|-----------|---------|----------|------|--------|-----|
+| ZRAM Swap | ✅ | ✅ | ✅ | ✅ | ❌ |
+| eMMC Tuning | ❌ | ✅ | ✅ | ✅ | ❌ |
+| UFW (Firewall) | ❌ | ✅ | ✅ | ✅ | ❌ |
+| SSH Hardening | ❌ | ✅ | ✅ | ✅ | ❌ |
+| Watchdog | ❌ | ✅ | ✅ | ✅ | ❌ |
+| Auto-Updates | ❌ | ✅ | ✅ | ✅ | ❌ |
+| Backups | ❌ | ✅ | ✅ | ✅ | ❌ |
+| HACS | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Monitoring | ❌ | ❌ | ✅ | ✅ | ❌ |
+| Tailscale | ❌ | ❌ | ✅ | ✅ | ❌ |
+| Cloudflare | ❌ | ❌ | ✅ | ❌ | ❌ |
+| Static IP | ❌ | ❌ | ❌ | ✅ | ❌ |
 
-Самый простой способ запустить скрипт — выполнить одну команду:
+### 4. Command Line Interface (CLI) Arguments
+For headless automation, the following flags are available:
+- `--profile <NAME>`: Specify profile.
+- `--machine <TYPE>`: Force HA machine type (default is auto-detected: `generic-x86-64`, `raspberrypi4-64`, `qemuarm-64`, etc.).
+- `--data-dir <PATH>`: Moves `/usr/share/hassio` and `/var/lib/docker` to an external drive. The script verifies the FS (ext4/btrfs) and free space (>10GB).
+- `--swap <SIZE|zram|none>`: Configure Swap. If a number is provided, it creates a file via `dd` and adds it to `/etc/fstab`.
+- `--from-step <STEP>`: Manually resume installation from a specific step (used internally after reboots).
+- `--import-config <FILE>`: Import a previously saved config (profile, tokens, IP) for identical deployment on other devices.
+- `--dry-run`: Simulation mode. Commands like `apt`, `dpkg`, `docker` are printed to the screen but not executed.
 
-<!-- TODO: Замените `YOUR_USERNAME/YOUR_REPO` на ваш реальный путь на GitHub -->
-```bash
-wget -qO- https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/install.sh | bash
-```
+### 5. Deep Dive: Network and NetworkManager
+Switching network managers on TV-boxes is the most common cause of "bricking". The script handles this as follows:
+1. **Backup:** Saves `/etc/network/interfaces` and `/etc/resolv.conf`.
+2. **Autostart Block:** Before `apt-get install network-manager`, a temporary file `/usr/sbin/policy-rc.d` is created, forbidding dpkg from automatically starting any services (exit 101). This prevents NM from taking over the network before it's configured.
+3. **NM Configuration:** Config files are created in `/etc/NetworkManager/conf.d/` to disable conflicts with `ifupdown`.
+4. **Switchover:** The `networking` service is stopped, NM is started. The script waits 30 seconds for an IP address.
+5. **Rollback:** If no IP is obtained, the script:
+   - Stops NM.
+   - Restores `interfaces.bak`.
+   - Enables `ifupdown` and runs `ifup <iface>`.
+   - If that fails, it invokes `dhclient` directly.
+6. **Static IP:** Applied via `nmcli con mod` to the active connection UUID. Changes are applied "on the fly" without dropping the current SSH session.
 
-Или, если вы хотите сначала скачать скрипт и изучить его:
-```bash
-wget https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/install.sh
-chmod +x install.sh
-sudo ./install.sh
-```
+### 6. Deep Dive: `os-release` Faking
+HA Supervised requires `ID=debian` in `/etc/os-release`. Armbian has `ID=armbian`.
+1. The script determines the target codename (bookworm/trixie).
+2. Saves the original file to `/var/lib/ha-installer/backup/os-release.original`.
+3. Creates a fake `os-release` with `ID=debian` and the correct `VERSION_CODENAME`.
+4. **Systemd Drop-in:** Creates `/etc/systemd/system/hassio-supervisor.service.d/fix-os-release.conf`.
+   - `ExecStartPre`: Before starting Supervisor, copies the fake `os-release` to `/etc/`.
+   - `ExecStopPost`: After stopping Supervisor, restores the original `os-release`.
+   *Result: The system knows it's Armbian, but HA Supervisor sees pure Debian.*
 
-При запуске без аргументов скрипт определит характеристики вашего устройства, проведет бенчмарк и откроет интерактивное меню.
+### 7. Deep Dive: AppArmor and Bootloader
+HA requires AppArmor in the kernel. On many boxes, it's disabled.
+1. Reads `/sys/module/apparmor/parameters/enabled`. If `N`, patching begins.
+2. The script searches for bootloader configs: `armbianEnv.txt` (Armbian), `extlinux.conf` (GRUB/U-Boot), `cmdline.txt` (Raspberry Pi).
+3. Depending on the format, it appends `apparmor=1 security=apparmor`:
+   - In `extlinux`: to the end of the `APPEND` line.
+   - In `armbianEnv`: to the `extraargs=` variable (or `optargs=`, `APPEND=`).
+4. **Auto-continuation:** If `--auto-reboot` is selected, the script creates a systemd-oneshot service `ha-install-continue.service`. This service starts on boot, deletes itself, and launches the script with the `--from-step=apparmor` flag.
+   Loop protection: The file `/var/lib/ha-installer/reboot_attempts` limits auto-reboots to three attempts.
 
----
+### 8. Backup Manager: Logic and Execution
+The `/usr/local/bin/ha-backup` script operates in two modes:
+1. **Full Snapshot (if HA CLI is available):**
+   - Calls `ha backups new --name AutoBackup_...`.
+   - Parses JSON via `jq`, keeps the last 5 snapshots, and deletes older ones via `ha backups remove`.
+2. **Fast TAR Backup (fallback):**
+   - Determines the path to `/config` inside the container using `docker inspect`.
+   - Creates an archive via `tar` (using `pigz` for multithreaded compression if installed).
+   - Excludes: `*.db`, `*.db-shm`, `tts/`, `deps/`, `__pycache__/`.
+3. **Remote Backup:**
+   - The `/usr/local/bin/ha-backup-remote` script takes the latest created backup.
+   - If the target is `ssh://`, it uses `rsync -avz --partial`.
+   - If the target is `rclone://`, it checks for the profile in `rclone listremotes` and executes `rclone copy`.
 
-## Интерактивный мастер (Wizard)
+### 9. Modules, Utilities, and Cron
+Scripts installed in `/usr/local/bin/` integrate automatically. The following tasks are generated in `/etc/cron.d/ha-tools`:
+- `*/5 * * * *` — `ha-watchdog` (pings 8123, restarts container on failure with exponential backoff: 5m, 10m, 20m... up to 60m).
+- `*/10 * * * *` — `ha-net-recovery` (pings gateway, restarts NetworkManager).
+- `*/5 * * * *` — `ha-thermal` (checks temp, alerts if >80C).
+- `0 4 * * 0` — `ha-backup` (every Sunday at 04:00).
+- `30 4 * * 0` — `ha-backup-remote` (Sunday at 04:30).
+- `* * * * *` — `ha-metrics` (updates Prometheus metrics every minute).
+- `0 9 * * 1` — `ha-weekly-report` (report on Mondays).
+- `30 3 * * *` — `ha-cleanup` (cleans Docker images and systemd journals).
 
-Если в главном меню выбрать "Установить HA Supervised", запустится мастер настройки. Он состоит из следующих этапов:
+### 10. Notification System (Webhooks)
+The `_send_webhook` script adapts the request format for specific services:
+- **ntfy.sh:** Sends Plain Text in Body, adds `Title`, `Priority`, `Tags` headers.
+- **Discord/Slack:** Forms JSON `{"content": "..."}` (Discord) or `{"text": "..."}` (Slack). Escapes special characters via `sed` (`s/\\/\\\\/g; s/"/\\"/g`).
+- **Gotify:** Sends JSON with `title`, `message`, `priority` fields.
+- **Unknown URL:** Tries Plain Text first. If the server responds with non-`2xx`, retries the request in JSON format `{"text":"..."}`.
+- **Rate Limiting:** Notifications are not sent more than once every 30 seconds (file `/tmp/.ha_notify_rate`).
 
-1. **Тест производительности:** Проверка CPU, RAM и скорости диска. На основе результатов скрипт порекомендует подходящий профиль.
-2. **Выбор профиля:** Предлагает выбрать пресет настроек или настроить всё вручную (Custom).
-3. **Система:** Настройка часового пояса, локали, профиля Swap (ZRAM или файл) и выбор внешнего диска для данных (если eMMC мало).
-4. **Сеть:** Настройка Wi-Fi (если адаптер обнаружен), статического IP, Tailscale VPN и Cloudflare Tunnel.
-5. **Уведомления:** Настройка Telegram-бота, ntfy.sh, Discord или кастомного Webhook.
-6. **Бэкапы:** Выбор локального хранилища, удаленного бэкапа (SSH/rclone) и возможность сразу восстановить архив `.tar.gz` предыдущей установки.
-7. **Подтверждение:** Вывод сводной информации перед началом установки.
-
----
-
-## Профили установки
-
-Для упрощения настройки встроены 5 профилей:
-
-| Профиль | Описание | Кому подходит |
-|---------|----------|---------------|
-| **minimal** | Только HA, Docker, OS-Agent. | Очень слабые устройства (1 ГБ RAM), где важен каждый процесс. |
-| **standard** | HA + UFW + Fail2Ban + Бэкапы + Watchdog + ZRAM. | **Рекомендуемый.** Подходит для 90% пользователей. |
-| **full** | Standard + Мониторинг Prometheus + Tailscale + Cloudflare. | Мощные SBC и серверы с большим объемом RAM. |
-| **server** | Full, но со статическим IP и без Cloudflare. | Выделенные домашние серверы. |
-| **dev** | Только HA + HACS. | Разработчикам для быстрых тестов. |
-
----
-
-## Параметры командной строки (CLI)
-
-Скрипт поддерживает полностью автоматическую установку без участия пользователя.
-
-### Основные режимы
-- `sudo ./install.sh` — Запуск интерактивного меню.
-- `sudo ./install.sh --check` — Диагностика системы (проверка Docker, сети, портов).
-- `sudo ./install.sh --status` — Мониторинг системы в реальном времени (TUI).
-- `sudo ./install.sh --rescue` — Режим восстановления (починка DNS, перезапуск Docker).
-- `sudo ./install.sh --update` — Обновление OS-Agent и HA Supervised.
-- `sudo ./install.sh --uninstall` — Удаление HA.
-- `sudo ./install.sh --benchmark` — Тест железа.
-- `sudo ./install.sh --self-update` — Обновление самого скрипта до последней версии с GitHub.
-- `sudo ./install.sh --self-test` — Внутренний тест функций скрипта.
-
-### Автоматическая установка (Headless)
-Вы можете развернуть HA одной строкой, например, через Ansible или скрипт инициализации:
-
-```bash
-sudo ./install.sh --profile standard \
-  --timezone Europe/Moscow \
-  --hostname true \
-  --auto-reboot \
-  --silent
-```
-
-### Дополнительные флаги
-- `--profile <ИМЯ>`: Указать профиль (`minimal`, `standard`, `full`, `server`, `dev`, `custom`).
-- `--timezone <ЗОНА>`: Например, `Europe/Moscow`.
-- `--data-dir <ПУТЬ>`: Перенести данные HA и Docker на внешний диск (например, `/mnt/sda1`).
-- `--swap <РАЗМЕР|zram|none>`: Настроить swap (в МБ) или ZRAM.
-- `--wifi <SSID> <ПАРОЛЬ>`: Настроить Wi-Fi.
-- `--webhook <URL>`: URL для вебхуков уведомлений.
-- `--docker-mirror <URL>`: Использовать зеркало для Docker Hub (если заблокирован).
-- `--from-step <ШАГ>`: Продолжить установку с указанного шага (используется скриптом после ребута).
-- `--dry-run`: Режим симуляции (никаких реальных изменений в систему не вносится).
-- `--machine <ТИП>`: Принудительно указать тип машины для HA (по умолчанию авто-детекция).
-
----
-
-## Модульная система (Menu Modules)
-
-Если у вас уже установлен Home Assistant, но вы хотите добавить новые функции без переустановки, используйте пункт "Установить модули" в главном меню (или `sudo ha-install --modules`).
-
-Доступные модули:
-- **ZRAM Swap:** Установка и настройка сжатия в оперативной памяти.
-- **eMMC Tuning:** Отключение `atime`, ограничение размера журналов systemd.
-- **USB Power:** Отключение энергосбережения USB (полезно для Zigbee/MQTT стиков).
-- **Watchdog:** Установка скрипта, который пингает HA каждые 5 минут и перезапускает его при зависании (с экспоненциальной задержкой).
-- **Notifications:** Интерактивная настройка Telegram/Webhook.
-- **Backups:** Установка скриптов локального и удаленного бэкапа.
-- **HACS:** Автоматическая установка Home Assistant Community Store.
-- **Tailscale VPN:** Установка Tailscale и проброс портов в UFW.
-- **Cloudflare Tunnel:** Установка `cloudflared` для публичного HTTPS доступа без открытия портов.
-- **Security:** Настройка UFW (файрвола) и жесткой политики SSH.
-
----
-
-## Установленные утилиты и скрипты
-
-Скрипт устанавливает в `/usr/local/bin/` набор утилит для обслуживания системы:
-
-- `ha-health`: Выводит красивый отчет о состоянии RAM, диска, контейнеров и пинга HA.
-- `ha-backup`: Создает бэкап. Если доступен HA CLI — делает полный снапшот. Если нет — бэкап конфигурации Core через `tar` (с исключением БД).
-- `ha-restore`: Меню восстановления из снапшота HA или tar-архива.
-- `ha-notify "Текст"`: Отправляет уведомление в настроенные каналы (Telegram/Webhook).
-- `ha-watchdog`: Проверяет доступность HA на порту 8123 и перезапускает контейнер при необходимости.
-- `ha-net-recovery`: Пингует шлюз и 8.8.8.8. При обрыве сети перезапускает NetworkManager.
-- `ha-cleanup`: Очищает старые логи и образы Docker, если место на диске заканчивается.
-- `ha-thermal`: Проверяет температуру CPU и шлет алерт при перегреве (>= 80C).
-- `ha-metrics`: Генерирует файл метрик для Prometheus Node Exporter.
-- `ha-boot-check`: Запускается после старта системы. Проверяет целостность ФС и запускает Supervisor, если он упал.
-- `ha-weekly-report`: Отправляет краткую сводку состояния системы раз в неделю.
-
-Все эти утилиты автоматически добавляются в `cron` (в файл `/etc/cron.d/ha-tools`).
-
----
-
-## Резервное копирование и восстановление
-
-Скрипт поддерживает два уровня бэкапов:
-
-1. **Нативные снапшоты HA (через CLI):** Если установлен пакет `homeassistant-supervised`, скрипт использует команду `ha backups new`. Это создает ПОЛНЫЙ бэкап (Core, Supervisor, Аддоны, БД). Раз в неделю старые снапшоты (оставляя 5 последних) автоматически удаляются.
-2. **Быстрые бэкапы TAR:** Если CLI недоступен, скрипт сам копирует конфигурацию `/config` внутрь контейнера, исключая тяжелые базы данных SQLite (`home-assistant_v2.db`), папки `tts` и `deps`.
-
-**Удаленные бэкапы:**
-Можно настроить отправку последнего созданного бэкапа в облако или на другой сервер:
-- `ssh://user@host:/path` — использует `rsync` по SSH.
-- `rclone://remote_name:path` — использует `rclone` для отправки в Яндекс.Диск, Google Drive, S3 и т.д. (Требует ручной настройки `sudo rclone config` после установки).
-
----
-
-## Сетевые настройки и VPN
-
-Один из самых сложных этапов на TV-боксах — настройка сети. Скрипт делает это максимально безопасно:
-
-1. **NetworkManager:** Скрипт устанавливает NM и отключает старый `ifupdown`. Перед применением настроек он делает паузу (если вы по SSH), чтобы вы успели завершить активные процессы. Если после переключения IP-адрес пропадает, скрипт **автоматически откатывает** сеть к исходному состоянию.
-2. **Static IP:** Применяется через `nmcli` к активному подключению без обрыва сессии.
-3. **Tailscale VPN:** Устанавливает клиент, пробрасывает порты 41641/udp и интерфейс `tailscale0` в UFW. Поддерживает автоматическую авторизацию через Auth Key.
-4. **Cloudflare Tunnel:** Устанавливает `cloudflared`. Позволяет опубликовать HA в интернете по HTTPS без открытия портов на роутере.
-
----
-
-## Уведомления
-
-Установщик может присылать уведомления о статусе установки, перезагрузках, ошибках и бэкапах.
-Поддерживаемые сервисы:
-- **Telegram:** Нужен токен бота и Chat ID. Скрипт сам отправит тестовое сообщение.
-- **ntfy.sh:** Бесплатный сервис без регистрации. Достаточно указать имя топика.
-- **Discord / Slack / Gotify:** Поддерживаются через Webhook URL. Скрипт автоматически форматирует JSON-пейлоад для каждого конкретного сервиса.
-
----
-
-## Режим восстановления (Rescue Mode)
-
-Если ваша система "сломалась" (HA не запускается, нет интернета, докер упал), запустите:
-```bash
-sudo ha-install --rescue
-```
-Скрипт поочередно проверит 8 узлов системы и попытается их починить:
-1. **ФС:** Проверка на Read-Only и перемонтирование в RW.
-2. **Диск:** Очистка места, если свободно < 500 МБ.
-3. **Сеть:** Перезапуск NetworkManager, поднятие интерфейса через `dhclient`.
-4. **DNS:** Прописывание `8.8.8.8` и `1.1.1.1` в `/etc/resolv.conf`.
-5. **Docker:** Перезапуск демона, если он не отвечает.
-6. **Supervisor:** Перезапуск службы `hassio-supervisor` (с подменой os-release, если нужно).
-7. **HA Core:** Запуск контейнера `homeassistant`, если он остановлен.
-8. **AppArmor:** Проверка статуса и перезапуск политик.
-
----
-
-## Удаление (Uninstall)
-
-Скрипт умеет полностью и безопасно удалять Home Assistant.
-В меню удаления доступны два режима:
-
-1. **Standard (Стандартный):**
-   - Удаляет пакеты HA, OS-Agent и контейнеры Docker HA.
-   - **Оставляет** Docker CE, NetworkManager и системные пакеты (ufw, curl и т.д.).
-   - Перед удалением папок (данных, бэкапов, логов) спрашивает подтверждение.
-
-2. **Full (Полный):**
-   - Удаляет **вообще всё**, что установил скрипт.
-   - Сносит Docker CE, все контейнеры и образы.
-   - Восстанавливает оригинальный `/etc/network/interfaces` и `/etc/resolv.conf`.
-   - Чистит загрузчик от параметров AppArmor.
-   - Возвращает системное имя хоста.
-   - Идеально для подготовки устройства к чистой переустановке ОС или скрипта.
-
----
-
-## Внутренние механизмы (Under the hood)
-
-### 1. Подмена os-release
-Home Assistant Supervised официально устанавливается только на Debian. Armbian, несмотря на то, что базируется на Debian, не проходит проверку. 
-Скрипт делает следующее:
-- Сохраняет оригинальный `/etc/os-release`.
-- Создает фейковый `os-release`, где пишет `ID=debian` и нужный `VERSION_CODENAME` (bookworm/trixie).
-- Устанавливает deb-пакет HA.
-- Создает systemd drop-in (`/etc/systemd/system/hassio-supervisor.service.d/fix-os-release.conf`). Этот drop-in перед каждым запуском Supervisor подменяет `os-release`, а после остановки Supervisor — восстанавливает оригинальный файл Armbian.
-
-### 2. Патчинг AppArmor
-HA Supervised жестко требует AppArmor. На многих TV-боксах он отключен в ядре.
-Скрипт ищет конфиги загрузчика (`armbianEnv.txt`, `extlinux.conf`, `uEnv.txt`, `cmdline.txt` для RPi). 
-Если он находит, что AppArmor отключен, он добавляет `apparmor=1 security=apparmor` в параметры ядра.
-Затем скрипт создает временный systemd-сервис, который включается при загрузке, ждет сеть и **продолжает установку** с того же места.
-
-### 3. Идемпотентность и State Machine
-Состояние хранится в `/var/lib/ha-installer/state`. 
-Формат: `имя_шага | timestamp | версия_скрипта`.
-Если скрипт обновился, шаги будут выполнены заново (чтобы применить логику новой версии).
-
-### 4. Откаты (Rollbacks)
-В скрипт встроена функция `push_rollback`. 
-Например, перед установкой Docker скрипт пушит команду `apt-get remove -y docker-ce`. 
-Если на любом последующем шаге происходит критическая ошибка (или нажат Ctrl+C), скрипт в блоке `cleanup` выполняет все запушенные команды отката в обратном порядке, возвращая систему в исходное состояние.
-
----
+### 11. Uninstallation and Rollbacks
+The `sudo ha-install --uninstall` command offers two paths:
+1. **Standard:**
+   - `dpkg --purge homeassistant-supervised os-agent`
+   - Removes HA containers (`docker rm -f`) and images (`docker rmi -f`).
+   - Removes generated scripts from `/usr/local/bin/` and UFW/Fail2Ban rules.
+   - Restores the original `os-release`.
+   - Docker and NetworkManager remain untouched.
+2. **Full:**
+   - Executes all Standard steps.
+   - Completely purges Docker CE (`apt-get purge docker-ce`), folders `/var/lib/docker` and `/usr/share/hassio`.
+   - Restores `ifupdown` and the original `/etc/network/interfaces`.
+   - Cleans AppArmor parameters from the bootloader.
+   - Reverts the original hostname.
+   - Outputs a list of installed dependencies (curl, jq, ufw, etc.) so the user can manually remove them via `apt autoremove`.
