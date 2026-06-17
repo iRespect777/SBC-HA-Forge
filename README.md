@@ -8,7 +8,7 @@
 
 # Ultimate Home Assistant Supervised Installer (SBC-HA-Forge)
 
-**Ультимативный установщик Home Assistant Supervised для TV-боксов, SBC и десктопов (Armbian / Debian).**
+# Ультимативный установщик Home Assistant Supervised для TV-боксов, SBC и десктопов (Armbian / Debian)(SBC-HA-Forge).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Bash Version](https://img.shields.io/badge/Bash-%3E%3D4.0-green.svg)](https://www.gnu.org/software/bash/)
@@ -77,6 +77,8 @@ sudo bash sbc_ha_forge.sh
 <a href="#english"><img src="https://img.shields.io/badge/🇬🇧_English-activeblue" alt="English"></a>
 
 </div>
+
+# Ultimate Home Assistant Supervised Installer (SBC-HA-Forge)
 
 ## 🇬🇧 English
 
