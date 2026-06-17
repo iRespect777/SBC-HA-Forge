@@ -6,7 +6,7 @@
 
 
 
-# Ultimate Home Assistant Supervised Installer (HAS-TVBox)
+# Ultimate Home Assistant Supervised Installer (SBC-HA-Forge)
 
 **Ультимативный установщик Home Assistant Supervised для TV-боксов, SBC и десктопов (Armbian / Debian).**
 
