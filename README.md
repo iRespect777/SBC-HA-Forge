@@ -5,12 +5,12 @@
 <a href="#-english"><img src="https://img.shields.io/badge/🇬🇧_English-inactive-lightgrey" alt="English"></a>
 
 
-# Ультимативный установщик Home Assistant Supervised для TV-боксов, SBC и десктопов (Armbian / Debian)(SBC-HA-Forge).
+# Ультимативный установщик Home Assistant Supervised для TV-боксов, SBC и десктопов (Armbian / Debian)(Hassify).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Bash Version](https://img.shields.io/badge/Bash-%3E%3D4.0-green.svg)](https://www.gnu.org/software/bash/)
 <!-- TODO: Замените iRespect777/HAS-tvbox на ваш репозиторий -->
-[![GitHub release](https://img.shields.io/github/v/release/iRespect777/SBC-HA-Forge?include_prereleases)](https://github.com/iRespect777/SBC-HA-Forge/releases)
+[![GitHub release](https://img.shields.io/github/v/release/iRespect777/Hassify?include_prereleases)](https://github.com/iRespect777/Hassify/releases)
 
 </div>
 
@@ -41,7 +41,7 @@
 
 ### 🚀 Быстрый старт
 ```bash
-wget https://raw.githubusercontent.com/iRespect777/SBC-HA-Forge/refs/heads/main/ha-installer/sbc_ha_forge.sh
+wget https://raw.githubusercontent.com/iRespect777/Hassify/refs/heads/main/ha-installer/sbc_ha_forge.sh
 sudo bash sbc_ha_forge.sh
 ```
 
@@ -75,7 +75,7 @@ sudo bash sbc_ha_forge.sh
 
 </div>
 
-# Ultimate Home Assistant Supervised Installer (SBC-HA-Forge)
+# Ultimate Home Assistant Supervised Installer (Hassify)
 
 ## 🇬🇧 English
 
@@ -102,7 +102,7 @@ It automatically resolves architecture issues, fakes `os-release` to pass HA che
 
 ### 🚀 Quick Start
 ```bash
-wget https://raw.githubusercontent.com/iRespect777/SBC-HA-Forge/refs/heads/main/ha-installer/sbc_ha_forge.sh
+wget https://raw.githubusercontent.com/iRespect777/Hassify/refs/heads/main/ha-installer/sbc_ha_forge.sh
 sudo bash sbc_ha_forge.sh
 ```
 
