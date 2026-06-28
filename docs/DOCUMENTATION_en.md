@@ -1,6 +1,6 @@
-# 📖 Full Documentation: SBC-HA-FORGE
+# 📖 Full Documentation: Hassify
 
-**SBC-HA-FORGE** is a complex orchestrator designed to fully automate the installation of Home Assistant Supervised on Single Board Computers (SBCs) and TV-Boxes. The script takes over the entire preparation of the host system, bypasses hardware limitations, and configures security and backups.
+**Hassify** is a complex orchestrator designed to fully automate the installation of Home Assistant Supervised on Single Board Computers (SBCs) and TV-Boxes. The script takes over the entire preparation of the host system, bypasses hardware limitations, and configures security and backups.
 
 ---
 
