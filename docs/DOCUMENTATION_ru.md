@@ -34,8 +34,8 @@ Home Assistant Supervised имеет строгие требования к хо
 Выполните одну команду в терминале вашего устройства:
 
 ```bash
-wget -qO install.sh https://raw.githubusercontent.com/iRespect777/HAS-tvbox/main/install.sh
-sudo bash install.sh
+wget https://raw.githubusercontent.com/iRespect777/Hassify/refs/heads/main/ha-installer/Hassify.sh
+sudo bash Hassify.sh
 ```
 
 После завершения установки скрипт скопирует себя в `/usr/local/bin/ha-install` и будет доступен для вызова из любой директории.
