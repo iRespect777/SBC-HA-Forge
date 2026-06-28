@@ -1,11 +1,11 @@
 #!/bin/bash
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
-# SBC-HA-Forge ULTIMATE INSTALLER Home Assistant Supervised
+# Hassify ULTIMATE INSTALLER Home Assistant Supervised
 # Version: 21
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
-# Repository: https://github.com/iRespect777/SBC-HA-Forge
+# Repository: https://github.com/iRespect777/Hassify
 # ============================================================================
 if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
@@ -5967,7 +5967,7 @@ show_banner() {
 	      echo "  ___) | |_) | |___  |  _  |/ ___ \  |  _|| |_| |  _ <| |_| | |___"
 	      echo " |____/|____/ \____| |_| |_/_/   \_\ |_|   \___/|_| \_\\\____|_____|"
           echo -e "${NC}"
-          echo -e "${BLUE}  [ SBC-HA-FORGE ]${NC} ${WHITE}${BOLD}Установщик v${SCRIPT_VERSION}${NC}"
+          echo -e "${BLUE}  [ Hassify ]${NC} ${WHITE}${BOLD}Установщик v${SCRIPT_VERSION}${NC}"
           echo -e "${DIM}  Ковка Home Assistant Supervised на TV-боксах и SBC${NC}"
 
         # Статус HA если установлен
