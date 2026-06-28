@@ -41,8 +41,8 @@
 
 ### 🚀 Быстрый старт
 ```bash
-wget https://raw.githubusercontent.com/iRespect777/Hassify/refs/heads/main/ha-installer/sbc_ha_forge.sh
-sudo bash sbc_ha_forge.sh
+wget https://raw.githubusercontent.com/iRespect777/Hassify/refs/heads/main/ha-installer/Hassify.sh
+sudo bash Hassify.sh
 ```
 
 После запуска откроется интерактивный мастер, который проведет вас через все этапы настройки.
@@ -102,8 +102,8 @@ It automatically resolves architecture issues, fakes `os-release` to pass HA che
 
 ### 🚀 Quick Start
 ```bash
-wget https://raw.githubusercontent.com/iRespect777/Hassify/refs/heads/main/ha-installer/sbc_ha_forge.sh
-sudo bash sbc_ha_forge.sh
+wget https://raw.githubusercontent.com/iRespect777/Hassify/refs/heads/main/ha-installer/Hassify.sh
+sudo bash Hassify.sh
 ```
 
 An interactive wizard will open, guiding you through the configuration process.
