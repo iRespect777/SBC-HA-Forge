@@ -5670,7 +5670,6 @@ do_self_update() {
   [ -z "$latest" ] && { msg_warn "Не удалось проверить версию"; return 1; }
 
   # Убираем префикс 'v' для корректного сравнения чисел
-  # (например, сравниваем "23" с "23", а не "23" с "v23")
   local latest_clean="${latest#v}"
   
   [ "$SCRIPT_VERSION" = "$latest_clean" ] && {
@@ -5696,13 +5695,23 @@ do_self_update() {
     return 1
   }
 
-  # Исправлено: убрана лишняя 'v' перед ${latest}
   msg_action "Загрузка ${latest}..."
   
-  # Исправлено: скачиваем из тега релиза (${latest}), а не из ветки main!
-  if ! wget -q -O "$nf" \
-    "https://raw.githubusercontent.com/${INSTALLER_REPO}/${latest}/install.sh" \
-    2>/dev/null; then
+  # Умная загрузка: сначала пробуем новое имя (hassify), 
+  # если 404 - пробуем старое (install.sh) для совместимости
+  local download_url=""
+  
+  if wget -q --timeout=10 --spider "https://raw.githubusercontent.com/${INSTALLER_REPO}/${latest}/hassify" 2>/dev/null; then
+    download_url="https://raw.githubusercontent.com/${INSTALLER_REPO}/${latest}/hassify"
+  elif wget -q --timeout=10 --spider "https://raw.githubusercontent.com/${INSTALLER_REPO}/${latest}/install.sh" 2>/dev/null; then
+    download_url="https://raw.githubusercontent.com/${INSTALLER_REPO}/${latest}/install.sh"
+  else
+    msg_error "Файл обновления не найден в репозитории (пробовали hassify и install.sh)"
+    rm -f "$nf"
+    return 1
+  fi
+
+  if ! wget -q -O "$nf" "$download_url" 2>/dev/null; then
     msg_error "Загрузка не удалась"
     rm -f "$nf"
     return 1
@@ -5748,6 +5757,7 @@ do_self_update() {
   mkdir -p "$(dirname "$target")"
   chmod +x "$nf"
 
+  # Атомарная замена файла
   if mv "$nf" "$target" 2>/dev/null; then
     msg_ok "Обновлён до ${new_ver}: ${target}"
   else
@@ -5762,7 +5772,9 @@ do_self_update() {
     fi
   fi
 
-  msg_info "Перезапустите: sudo bash ${target}"
+  msg_ok "Перезапуск обновленной версии..."
+  sleep 1
+  exec "$target" "$@"
 }
 
 # ============================================================================
