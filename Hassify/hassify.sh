@@ -5669,6 +5669,7 @@ do_self_update() {
   latest=$(get_latest_release "$INSTALLER_REPO")
   [ -z "$latest" ] && { msg_warn "Не удалось проверить версию"; return 1; }
 
+  # Убираем префикс 'v' для корректного сравнения
   local latest_clean="${latest#v}"
   
   [ "$SCRIPT_VERSION" = "$latest_clean" ] && {
@@ -5696,15 +5697,18 @@ do_self_update() {
 
   msg_action "Загрузка ${latest}..."
   
-  local download_url="https://github.com/${INSTALLER_REPO}/releases/download/${latest}/hassify.sh"
+  # Скачиваем напрямую из репозитория по тегу релиза.
+  # УКАЖИТЕ ПРАВИЛЬНЫЙ ПУТЬ К ПАПКЕ В РЕПОЗИТОРИИ! (Например: Hassify/hassify.sh)
+  local download_url="https://raw.githubusercontent.com/${INSTALLER_REPO}/${latest}/Hassify/hassify.sh"
 
   if ! wget -q --timeout=30 --tries=3 -O "$nf" "$download_url" 2>/dev/null; then
     msg_error "Загрузка не удалась"
-    msg_dim "Проверьте, прикреплен ли файл hassify.sh к релизу ${latest} на GitHub"
+    msg_dim "Проверьте, что файл hassify.sh существует по пути Hassify/hassify.sh в теге ${latest}"
     rm -f "$nf"
     return 1
   fi
 
+  # Проверяем размер — защита от пустых страниц 404
   local sz
   sz=$(wc -c < "$nf" 2>/dev/null || echo 0)
   sz="${sz//[^0-9]/}"
@@ -5714,18 +5718,21 @@ do_self_update() {
     return 1
   fi
 
+  # Проверяем синтаксис bash
   if ! bash -n "$nf" 2>/dev/null; then
     msg_error "Синтаксическая ошибка в загруженном файле"
     rm -f "$nf"
     return 1
   fi
 
+  # Проверяем что это наш скрипт
   if ! grep -q "SCRIPT_VERSION=" "$nf"; then
     msg_error "Некорректный файл (нет SCRIPT_VERSION)"
     rm -f "$nf"
     return 1
   fi
 
+  # Извлекаем реальную версию из скачанного файла
   local new_ver
   new_ver=$(grep "^readonly SCRIPT_VERSION=" "$nf" | head -1 | cut -d'"' -f2)
   if [ -z "$new_ver" ]; then
@@ -5739,6 +5746,7 @@ do_self_update() {
   mkdir -p "$(dirname "$target")"
   chmod +x "$nf"
 
+  # Безопасная замена файла
   if mv "$nf" "$target" 2>/dev/null; then
     msg_ok "Обновлён до ${new_ver}: ${target}"
   else
@@ -5753,6 +5761,7 @@ do_self_update() {
     fi
   fi
 
+  # Автоматический перезапуск новой версии с теми же аргументами
   msg_ok "Перезапуск обновленной версии..."
   sleep 1
   exec "$target" "$@"
