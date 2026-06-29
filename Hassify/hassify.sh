@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034,SC2155,SC2086
 # ============================================================================
 # Hassify - Ultimate Home Assistant Supervised Installer
-# Version: 24
+# Version: 24.0
 # Platform: TV-Boxes & SBC (Armbian Bookworm/Trixie / aarch64 / x86_64)
 # License: MIT
 # Repository: https://github.com/iRespect777/Hassify
@@ -11,7 +11,7 @@ if [ -z "$BASH_VERSION" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "Requires bash >= 4.0"; exit 1
 fi
 
-readonly SCRIPT_VERSION="24"
+readonly SCRIPT_VERSION="24.0"
 readonly HA_DEFAULT_MACHINE="qemuarm-64"
 readonly INSTALLER_REPO="iRespect777/hassify"
 readonly HA_INSTALLER_DIR="/var/lib/hassify"
@@ -5669,7 +5669,6 @@ do_self_update() {
   latest=$(get_latest_release "$INSTALLER_REPO")
   [ -z "$latest" ] && { msg_warn "Не удалось проверить версию"; return 1; }
 
-  # Убираем префикс 'v' для корректного сравнения чисел
   local latest_clean="${latest#v}"
   
   [ "$SCRIPT_VERSION" = "$latest_clean" ] && {
@@ -5697,55 +5696,38 @@ do_self_update() {
 
   msg_action "Загрузка ${latest}..."
   
-  # Умная загрузка: сначала пробуем новое имя (hassify), 
-  # если 404 - пробуем старое (install.sh) для совместимости
-  local download_url=""
-  
-  if wget -q --timeout=10 --spider "https://raw.githubusercontent.com/${INSTALLER_REPO}/${latest}/hassify" 2>/dev/null; then
-    download_url="https://raw.githubusercontent.com/${INSTALLER_REPO}/${latest}/hassify"
-  elif wget -q --timeout=10 --spider "https://raw.githubusercontent.com/${INSTALLER_REPO}/${latest}/install.sh" 2>/dev/null; then
-    download_url="https://raw.githubusercontent.com/${INSTALLER_REPO}/${latest}/install.sh"
-  else
-    msg_error "Файл обновления не найден в репозитории (пробовали hassify и install.sh)"
-    rm -f "$nf"
-    return 1
-  fi
+  local download_url="https://github.com/${INSTALLER_REPO}/releases/download/${latest}/hassify.sh"
 
-  if ! wget -q -O "$nf" "$download_url" 2>/dev/null; then
+  if ! wget -q --timeout=30 --tries=3 -O "$nf" "$download_url" 2>/dev/null; then
     msg_error "Загрузка не удалась"
+    msg_dim "Проверьте, прикреплен ли файл hassify.sh к релизу ${latest} на GitHub"
     rm -f "$nf"
     return 1
   fi
 
-  # Проверяем размер — защита от пустых страниц 404
   local sz
   sz=$(wc -c < "$nf" 2>/dev/null || echo 0)
   sz="${sz//[^0-9]/}"
   if [ "${sz:-0}" -lt 10000 ]; then
-    msg_error "Файл слишком мал (${sz}б) — возможно ошибка загрузки"
+    msg_error "Файл слишком мал (${sz}б) — возможно это страница 404"
     rm -f "$nf"
     return 1
   fi
 
-  # Проверяем синтаксис bash
   if ! bash -n "$nf" 2>/dev/null; then
     msg_error "Синтаксическая ошибка в загруженном файле"
     rm -f "$nf"
     return 1
   fi
 
-  # Проверяем что это наш скрипт
   if ! grep -q "SCRIPT_VERSION=" "$nf"; then
     msg_error "Некорректный файл (нет SCRIPT_VERSION)"
     rm -f "$nf"
     return 1
   fi
 
-  # Проверяем реальную версию в файле
   local new_ver
-  new_ver=$(grep "^readonly SCRIPT_VERSION=" "$nf" \
-    | head -1 \
-    | cut -d'"' -f2)
+  new_ver=$(grep "^readonly SCRIPT_VERSION=" "$nf" | head -1 | cut -d'"' -f2)
   if [ -z "$new_ver" ]; then
     msg_error "Не удалось определить версию в загруженном файле"
     rm -f "$nf"
@@ -5753,11 +5735,10 @@ do_self_update() {
   fi
   msg_info "Версия в файле: ${new_ver}"
 
-  local target="$SAFE_SCRIPT_PATH"
+  local target="$SAFE_SCRIPT_PATH" # /usr/local/bin/hassify
   mkdir -p "$(dirname "$target")"
   chmod +x "$nf"
 
-  # Атомарная замена файла
   if mv "$nf" "$target" 2>/dev/null; then
     msg_ok "Обновлён до ${new_ver}: ${target}"
   else
